@@ -22,6 +22,10 @@ python -m PyInstaller --noconfirm --clean "S5A3服务端管理.spec"   # 产出 
 - 构建 / 打包配置及输入素材
 - 必要测试与文档
 
+## 下载
+
+最新 exe 见 [v2026.11.20.1](https://github.com/yuanqilei/s5a3-deploy-tool/releases/tag/v2026.11.20.1)（附 `SHA256SUMS.txt`）。
+
 ## 发布责任
 
 独立部署工具 EXE。大文件（EXE、素材二进制）放 Release 附件或对象存储，不提交 Git 历史；每个 Release 附 `SHA256SUMS`。
