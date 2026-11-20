@@ -153,7 +153,7 @@ F_ENTRY = ("Consolas", 10)
 F_LOG = ("Consolas", 9)
 
 
-TOOL_VERSION = "2026.11.19"
+TOOL_VERSION = "2026.11.20.1"
 TOOL_BUILD = "2026-11-19"
 
 
