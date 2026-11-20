@@ -46,3 +46,5 @@ Thumbs.db
 # Python 缓存
 __pycache__/
 *.pyc
+# build 时由 src 复制，不入库
+build/s5a3_deploy_tool.py
