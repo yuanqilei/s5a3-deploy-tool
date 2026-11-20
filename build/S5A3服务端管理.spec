@@ -2,8 +2,8 @@
 
 
 a = Analysis(
-    ['s5a3_deploy_tool.py'],
-    pathex=[],
+    [str(SPECPATH + '/../src/s5a3_deploy_tool.py')],
+    pathex=[str(SPECPATH + '/../src')],
     binaries=[],
     datas=[('S5A3BG.jpg', '.')],
     hiddenimports=[],

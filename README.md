@@ -24,7 +24,9 @@ python -m PyInstaller --noconfirm --clean "S5A3服务端管理.spec"   # 产出 
 
 ## 下载
 
-最新 exe 见 [v2026.11.20.1](https://github.com/yuanqilei/s5a3-deploy-tool/releases/tag/v2026.11.20.1)：`S5A3-ServerManager-2026.11.20.1.exe`（23,607,036 B / sha256 `a71176bb…`，附 `SHA256SUMS.txt`）。
+`2026.11.20.3` 增加签名自动更新：启动后台检查、用户确认安装、任务期间禁止替换、新版启动失败回滚、保留本机配置。首次需手动换装支持更新的新 EXE；发布与签名方法见 [自动更新说明](docs/AUTO_UPDATE.md)。
+
+最新 exe 见 [v2026.11.20.3](https://github.com/yuanqilei/s5a3-deploy-tool/releases/tag/v2026.11.20.3)：`S5A3-ServerManager-2026.11.20.3.exe`（36,296,897 B / sha256 `b6ef0463…`，附签名更新清单和 `SHA256SUMS.txt`）。
 
 > Windows 版中文文件名在 Release 上传时会被清洗为 ASCII，故资产名用英文；下载后可自行改名。
 

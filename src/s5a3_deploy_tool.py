@@ -31,6 +31,7 @@ import threading
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox
+import self_update
 
 try:
     import paramiko
@@ -153,7 +154,7 @@ F_ENTRY = ("Consolas", 10)
 F_LOG = ("Consolas", 9)
 
 
-TOOL_VERSION = "2026.11.20.2"
+TOOL_VERSION = "2026.11.20.3"
 TOOL_BUILD = "2026-11-19"
 
 
@@ -753,6 +754,11 @@ class App:
         self._pump_log()
         self._apply_bg()
         self.root.bind("<Configure>", self._on_resize)
+        self._update_checking = False
+        self._update_checked = False
+        self._available_update = None
+        if getattr(sys, "frozen", False):
+            self.root.after(5000, self._check_update)
 
     # ---------------- 背景 ----------------
     def _dark_titlebar(self):
@@ -864,6 +870,8 @@ class App:
         bar.pack(side="bottom", fill="x", padx=16, pady=(4, 8))
         self.st_right = tk.Label(bar, text="游戏服务端", bg=C_PANEL, fg=C_DIM, font=F_HINT)
         self.st_right.pack(side="right")
+        tk.Button(bar, text="检查更新", command=lambda: self._check_update(True),
+                  bg=C_PANEL_HI, fg=C_TEXT, relief="flat", font=F_HINT).pack(side="right", padx=10)
         self.st_conn = tk.Label(bar, text="● 未连接", bg=C_PANEL, fg=C_DANGER, font=F_HINT)
         self.st_conn.pack(side="left")
         self.st_mid = tk.Label(bar, text="就绪", bg=C_PANEL, fg=C_DIM, font=F_HINT)
@@ -1290,6 +1298,19 @@ class App:
                     self._done(evt[1])
                 elif evt[0] == "conn":
                     self._set_conn(evt[1], evt[2] if len(evt) > 2 else None)
+                elif evt[0] == "update-check":
+                    self._update_checking = False
+                    if evt[2]:
+                        self._log("检查更新失败：" + evt[2], "warn")
+                        if evt[3]:
+                            messagebox.showwarning("检查更新", evt[2], parent=self.root)
+                    elif evt[1]:
+                        self._available_update = evt[1]
+                        self._offer_update()
+                    elif evt[3]:
+                        messagebox.showinfo("检查更新", "当前没有可安装的签名新版。", parent=self.root)
+                elif evt[0] == "update-download":
+                    self._finish_update_download(*evt[1:])
         except queue.Empty:
             pass
         self.root.after(90, self._pump_log)
@@ -1297,6 +1318,63 @@ class App:
     def _clear_log(self):
         for pane in self.logs:
             pane.clear()
+
+    def _check_update(self, manual=False):
+        if self.busy:
+            if manual:
+                messagebox.showinfo("检查更新", "请等待当前任务结束后再更新。", parent=self.root)
+            return
+        if self._available_update:
+            self._offer_update()
+            return
+        if self._update_checking:
+            return
+        self._update_checking = True
+        self._update_checked = True
+        def check():
+            try:
+                result = self_update.check(TOOL_VERSION)
+                self.ui_queue.put(("update-check", result, "", manual))
+            except Exception as error:
+                self.ui_queue.put(("update-check", None, str(error), manual))
+        threading.Thread(target=check, daemon=True).start()
+
+    def _offer_update(self):
+        if self.busy or not self._available_update:
+            return
+        envelope, data = self._available_update
+        if not messagebox.askyesno("发现新版", "当前：%s\n新版：%s\n\n%s\n\n下载校验后将退出并安装更新，是否继续？" %
+                                  (TOOL_VERSION, data["version"], data.get("notes", "")), parent=self.root):
+            self._available_update = None
+            return
+        if not getattr(sys, "frozen", False):
+            messagebox.showinfo("源码运行", "自动替换仅支持已打包的 EXE；源码请使用 Git 更新。", parent=self.root)
+            return
+        self.busy = True
+        for button in self.buttons:
+            button.configure(state="disabled")
+        self._set_progress("正在下载并校验新版…")
+        def download():
+            try:
+                folder = self_update.stage(envelope, TOOL_VERSION)
+                self.ui_queue.put(("update-download", folder, envelope, ""))
+            except Exception as error:
+                self.ui_queue.put(("update-download", None, envelope, str(error)))
+        threading.Thread(target=download, daemon=True).start()
+
+    def _finish_update_download(self, folder, envelope, error):
+        if not error:
+            try:
+                self_update.launch_helper(folder, envelope, TOOL_VERSION)
+                self.root.destroy()
+                return
+            except Exception as failure:
+                error = str(failure)
+        self.busy = False
+        for button in self.buttons:
+            button.configure(state="normal")
+        self._set_progress("更新未完成，当前程序保持可用", C_DANGER)
+        messagebox.showwarning("更新失败", error, parent=self.root)
 
     def _set_conn(self, ok, text=None):
         if not hasattr(self, "st_conn"):
@@ -1430,6 +1508,10 @@ class App:
         self._set_progress(("完成" if ok else "失败，见日志") + f"  用时 {dur:.1f}s",
                            C_OK if ok else C_DANGER)
         self._set_conn(getattr(self, "_connected", False))
+        if self._available_update:
+            self.root.after(100, self._offer_update)
+        elif not self._update_checked:
+            self.root.after(100, self._check_update)
 
     def _ssh(self, cfg):
         cli = SSHClient(cfg["host"], cfg["user"], cfg["password"])
@@ -3370,6 +3452,8 @@ fi
 
 
 def main():
+    if "--apply-update" in sys.argv:
+        raise SystemExit(self_update.apply(sys.argv[sys.argv.index("--apply-update") + 1]))
     if "--selftest" in sys.argv:
         root = tk.Tk()
         app = App(root)
@@ -3381,6 +3465,11 @@ def main():
         return
     root = tk.Tk()
     App(root)
+    if "--update-ready" in sys.argv:
+        job = sys.argv[sys.argv.index("--update-ready") + 1]
+        root.after_idle(lambda: self_update.acknowledge(job, TOOL_VERSION))
+    if "--update-rollback" in sys.argv:
+        root.after_idle(lambda: messagebox.showwarning("更新回滚", "新版启动未完成，已恢复旧版。", parent=root))
     root.mainloop()
 
 

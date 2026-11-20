@@ -8,7 +8,7 @@ python -m PyInstaller --noconfirm --clean --onefile --windowed `
   --icon "S5A3工具图标.ico" `
   --version-file "version_info.txt" `
   --add-data "S5A3BG.jpg;." `
-  s5a3_deploy_tool.py
+  ..\src\s5a3_deploy_tool.py
 
 Write-Host ""
 Write-Host "产物: dist\S5A3服务端管理.exe"
