@@ -26,7 +26,9 @@ python -m PyInstaller --noconfirm --clean "S5A3服务端管理.spec"   # 产出 
 
 `2026.11.20.3` 增加签名自动更新：启动后台检查、用户确认安装、任务期间禁止替换、新版启动失败回滚、保留本机配置。首次需手动换装支持更新的新 EXE；发布与签名方法见 [自动更新说明](docs/AUTO_UPDATE.md)。
 
-最新 exe 见 [v2026.11.20.3](https://github.com/yuanqilei/s5a3-deploy-tool/releases/tag/v2026.11.20.3)：`S5A3-ServerManager-2026.11.20.3.exe`（36,296,897 B / sha256 `b6ef0463…`，附签名更新清单和 `SHA256SUMS.txt`）。
+最新 exe 见 [v2026.11.20.4](https://github.com/yuanqilei/s5a3-deploy-tool/releases/tag/v2026.11.20.4)：`S5A3-ServerManager-2026.11.20.4.exe`（36,300,789 B / sha256 `becb3e79…`，附签名更新清单和 `SHA256SUMS.txt`）。
+
+`2026.11.20.4` 修复 Git/普通源码包首次部署误报缺少 runtime 文件的问题；自动生成新安装的运行配置，兼容当前 Dockerfile，已有配置保持不变。详见 [运行配置准备](docs/RUNTIME_PREPARATION.md)。
 
 > Windows 版中文文件名在 Release 上传时会被清洗为 ASCII，故资产名用英文；下载后可自行改名。
 

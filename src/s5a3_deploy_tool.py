@@ -154,7 +154,7 @@ F_ENTRY = ("Consolas", 10)
 F_LOG = ("Consolas", 9)
 
 
-TOOL_VERSION = "2026.11.20.3"
+TOOL_VERSION = "2026.11.20.4"
 TOOL_BUILD = "2026-11-19"
 
 
@@ -1072,7 +1072,7 @@ class App:
                   highlightthickness=1, highlightbackground=C_LINE).pack(
             side="left", padx=(6, 0))
         r += 1
-        self._flabel(form, r, "远程仓库", tip="示例：https://github.com/yuanqilei/s5a3-server.git\n首次部署需先在服务器上 prepare 生成 runtime/docker/。")
+        self._flabel(form, r, "远程仓库", tip="示例：https://github.com/yuanqilei/s5a3-server.git\n首次部署会使用仓库生成器准备 runtime/docker/，需提供部署 PVF。")
         self.e_repo, _ = self._fentry(form, r, c["repo"], colspan=3)
         r += 1
 
@@ -1832,18 +1832,21 @@ else
   SRC="$STAGE"
 fi
 echo "      包根目录：$SRC"
-if [ ! -f "$SRC/runtime/docker/compose.json" ]; then
-  echo "[错误] 包里没有 runtime/docker/compose.json，不是完整部署仓库"
+if [ ! -f "$SRC/runtime/docker/compose.json" ] && {{ [ ! -f "$SRC/go-server/go.mod" ] || [ ! -f "$SRC/deploy/docker/manage.py" ]; }}; then
+  echo "[错误] 包中既没有运行配置，也没有 go-server 与 deploy/docker/manage.py"
   exit 1
 fi
 mkdir -p "$TARGET"
 EXCL="--exclude=./.git"
-if [ -f "$TARGET/runtime/docker/data/Script.pvf" ]; then
+if [ -f "$TARGET/runtime/docker/compose.json" ]; then
+  echo "      已有运行配置，保留整个 runtime/docker 不被源码包覆盖"
+  EXCL="$EXCL --exclude=./runtime/docker"
+elif [ -f "$TARGET/runtime/docker/data/Script.pvf" ]; then
   echo "      服务端已有 PVF，保留 runtime/docker/data 不被覆盖"
   EXCL="$EXCL --exclude=./runtime/docker/data"
 fi
 tar -C "$SRC" -cf - $EXCL . | tar -C "$TARGET" -xf -
-[ -f "$TARGET/runtime/docker/compose.json" ] || {{ echo "[错误] 覆盖后仍缺 compose.json"; exit 1; }}
+[ -f "$TARGET/runtime/docker/compose.json" ] || [ -f "$TARGET/deploy/docker/manage.py" ] || {{ echo "[错误] 覆盖后缺少运行配置及生成器"; exit 1; }}
 echo "      源码已覆盖到 $TARGET"
 rm -rf "$STAGE" "$TMP"
 """
@@ -1851,20 +1854,82 @@ rm -rf "$STAGE" "$TMP"
         if rc != 0:
             raise RuntimeError("源码包解压/覆盖失败")
 
-    def _check_runtime(self, cli, cfg):
-        """仓库必需文件自检：缺一个后面必然失败，提前拦下来。"""
+    def _check_runtime(self, cli, cfg, initialize=False):
+        """Generated runtime is private state, not a source repository input."""
         p = cfg["path"]
-        need = [COMPOSE, "runtime/docker/server.env",
-                "runtime/docker/database.env", "runtime/docker/Dockerfile.deploy"]
+        rc, _ = cli.capture(f"test -f {q(posixpath.join(p, 'runtime/docker/.s5a3-prepare-incomplete'))}")
+        if rc == 0:
+            raise RuntimeError("上次运行配置初始化未完成，已停止启动；请核对生成器错误并恢复/补齐配置后移除 .s5a3-prepare-incomplete 标记")
+        need = [COMPOSE, "runtime/docker/server.env", "runtime/docker/database.env"]
         missing = []
         for rel in need:
             rc, _ = cli.capture(f"test -f {q(posixpath.join(p, rel))}")
             if rc != 0:
                 missing.append(rel)
+        rc, _ = cli.capture(f"test -f {q(posixpath.join(p, 'runtime/docker/Dockerfile.deploy'))} || test -f {q(posixpath.join(p, 'deploy/docker/Dockerfile'))}")
+        if rc != 0:
+            raise RuntimeError("源码缺少构建文件：deploy/docker/Dockerfile（或旧版 runtime/docker/Dockerfile.deploy）")
+        if missing and initialize:
+            if len(missing) != len(need):
+                raise RuntimeError("已有运行配置不完整：" + "、".join(missing) + "；请恢复配置备份，未自动重建密码")
+            self._prepare_runtime(cli, cfg)
+            missing = []
+            for rel in need:
+                rc, _ = cli.capture(f"test -f {q(posixpath.join(p, rel))}")
+                if rc != 0:
+                    missing.append(rel)
         if missing:
             raise RuntimeError(
-                "仓库缺少必需文件：" + "、".join(missing) + "（部署会失败）")
+                "运行配置缺少：" + "、".join(missing) + "；这些文件不在 Git 仓库中，请首次部署生成或恢复原配置备份")
         self._log("      必需文件齐全", "ok")
+
+    def _prepare_runtime(self, cli, cfg):
+        """Only bootstrap a new installation; never regenerate existing state."""
+        self._log("      首次部署：构建资源提取器并生成运行配置（不启动容器）…", "gold")
+        script = f"""
+set -e
+cd {q(cfg['path'])}
+for f in deploy/docker/manage.py deploy/docker/Dockerfile deploy/templates/docker-instance.recommended.json; do
+  [ -f "$f" ] || {{ echo "[错误] 缺少官方配置生成器或推荐配置：$f"; exit 1; }}
+done
+[ ! -e runtime/docker/instance.json ] || {{ echo "[错误] 已有 instance.json，拒绝自动重建；请恢复原运行配置"; exit 1; }}
+if docker inspect {DB_C} >/dev/null 2>&1 || docker inspect {SERVER_C} >/dev/null 2>&1; then
+  echo "[错误] 已有游戏/数据库容器但运行配置缺失，请先恢复备份，不能生成新密码"
+  exit 1
+fi
+VOLUMES=$(docker volume ls --filter label=com.docker.compose.project=servers5a3 -q)
+if [ -n "$VOLUMES" ] || docker volume inspect servers5a3_database >/dev/null 2>&1; then
+  echo "[错误] 已有数据库卷，拒绝作为首次安装初始化；请恢复运行配置备份"
+  exit 1
+fi
+if [ -d runtime/docker/server ] && [ -n "$(find runtime/docker/server -mindepth 1 -print -quit)" ]; then
+  echo "[错误] 已有服务端运行数据，请先恢复原配置"
+  exit 1
+fi
+[ -s runtime/docker/data/Script.pvf ] || {{ echo "[错误] 首次初始化需要 Script.pvf，请填写部署 PVF 后重试"; exit 1; }}
+: > runtime/docker/.s5a3-prepare-incomplete
+python3 deploy/docker/manage.py build --image servers5a3:launcher --project servers5a3
+python3 deploy/docker/manage.py prepare --image servers5a3:launcher --project servers5a3
+python3 - <<'PY'
+import json, os
+from pathlib import Path
+path = Path('runtime/docker/instance.json')
+config = json.loads(path.read_text(encoding='utf-8'))
+recommended = json.loads(Path('deploy/templates/docker-instance.recommended.json').read_text(encoding='utf-8'))
+protected = {{'database_password', 'root_password', 'admin_token', 'host_ip', 'subnet', 'server_ip', 'database_ip', 'client_dir', 'server_image'}}
+if protected.intersection(recommended):
+    raise SystemExit('推荐配置含部署身份字段，拒绝覆盖')
+merged = {{**config, **recommended, 'runtime_compatibility': {{**config.get('runtime_compatibility', {{}}), **recommended.get('runtime_compatibility', {{}})}}}}
+temporary = path.with_suffix('.json.prepared')
+temporary.write_text(json.dumps(merged, indent=2) + '\\n', encoding='utf-8')
+os.replace(temporary, path)
+PY
+python3 deploy/docker/manage.py prepare --image servers5a3:launcher --project servers5a3
+rm -f runtime/docker/.s5a3-prepare-incomplete
+echo "      首次运行配置已生成，已应用官方推荐配置；未启动或删除任何容器/数据库卷"
+"""
+        if cli.run(script, self._line_cb, timeout=3600) != 0:
+            raise RuntimeError("首次运行配置准备失败，未启动服务；请查看上方具体错误并保留现场")
 
     def _ensure_pvf(self, cli, cfg):
         remote = self._rp(cfg, PVF_REL)
@@ -1894,7 +1959,10 @@ set -e
 cd {q(cfg['path'])}
 docker tag servers5a3:launcher servers5a3:rollback-$(date +%Y%m%d%H%M%S) 2>/dev/null || true
 echo "      构建镜像（首次 2-5 分钟）"
-docker build -t servers5a3:launcher -f runtime/docker/Dockerfile.deploy . || {{
+DOCKERFILE=runtime/docker/Dockerfile.deploy
+[ -f "$DOCKERFILE" ] || DOCKERFILE=deploy/docker/Dockerfile
+[ -f "$DOCKERFILE" ] || {{ echo "[错误] 找不到 Dockerfile"; exit 1; }}
+docker build -t servers5a3:launcher -f "$DOCKERFILE" . || {{
   echo "[错误] 镜像构建失败，运行中的容器未受影响"
   echo "       现存可回滚镜像："
   docker images servers5a3 --format '{{{{.Repository}}}}:{{{{.Tag}}}}' | head -5
@@ -1937,12 +2005,12 @@ docker compose -p servers5a3 -f {COMPOSE} ps
             self._preflight(cli, cfg)
             self._log("[2/7] 获取源码", "gold")
             self._fetch_sources(cli, cfg)
-            self._log("[3/7] 检查 runtime 必需文件", "gold")
-            self._check_runtime(cli, cfg)
-            self._log("[4/7] 恢复私有补丁", "gold")
+            self._log("[3/7] 恢复私有补丁", "gold")
             self._restore_patches(cli, cfg)
-            self._log("[5/7] 准备 PVF", "gold")
+            self._log("[4/7] 准备 PVF", "gold")
             self._ensure_pvf(cli, cfg)
+            self._log("[5/7] 检查并准备 runtime 运行配置", "gold")
+            self._check_runtime(cli, cfg, initialize=not force)
             self._log("[6/7] 构建镜像 + 启动容器", "gold")
             self._build_and_up(cli, cfg, force)
             self._log("[7/7] 等待服务就绪", "gold")
