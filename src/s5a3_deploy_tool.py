@@ -153,7 +153,7 @@ F_ENTRY = ("Consolas", 10)
 F_LOG = ("Consolas", 9)
 
 
-TOOL_VERSION = "2026.11.20.1"
+TOOL_VERSION = "2026.11.20.2"
 TOOL_BUILD = "2026-11-19"
 
 
@@ -2711,6 +2711,7 @@ done
             "部署 GM 后台（Docker Compose）",
             ["会重新构建 purplemagic:local 镜像，并重启 gateway / gm / edge。",
              "缺物品索引时会自动跑 4 个索引（约 15 分钟），已存在则跳过。",
+             "每次部署都会初始化管理表；初始化失败时停止，不启动新服务。",
              "玩家 API 会短暂中断（几秒到几分钟，取决于是否重建镜像）。",
              "填了「GM 仓库」时会先 git reset --hard 到最新代码（该目录未提交改动会丢）。",
              "不会改动登录器档案与已发布内容。"],
@@ -2759,12 +2760,18 @@ fi
                 self._log("      已有物品索引，跳过索引步骤")
             else:
                 self._log("      未发现索引，开始建索引（约 15 分钟）…")
-                for step in ("index-pvf", "index-items", "index-quests", "index-professions", "schema"):
+                for step in ("index-pvf", "index-items", "index-quests", "index-professions"):
                     self._log("      >>> %s" % step)
                     rc = cli.run(compose + " --profile setup run --rm " + step,
                                  self._line_cb, timeout=3600)
                     if rc != 0:
                         raise RuntimeError("%s 失败" % step)
+
+            self._log("      初始化管理表（已有表保留，补齐新增表）…")
+            rc = cli.run(compose + " --profile setup run --rm schema",
+                         self._line_cb, timeout=3600)
+            if rc != 0:
+                raise RuntimeError("管理表初始化失败，停止部署，不启动新服务")
 
             self._log("      启动 gateway / gm / edge …")
             rc = cli.run(compose + " up -d gateway gm edge", self._line_cb, timeout=900)

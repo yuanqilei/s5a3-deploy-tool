@@ -38,6 +38,8 @@ python -m PyInstaller --noconfirm --clean "S5A3服务端管理.spec"   # 产出 
 
 ## 配套
 
+版本 `2026.11.20.2` 修复“部署 GM”在已有物品索引时跳过管理表初始化的问题。每次部署按“同步源码 → 构建镜像 → 按需建立索引 → 初始化管理表 → 启动服务 → 探测”执行；建表失败会停止后续启动。旧 EXE 需要重新打包或更新，拉取源码不会自动更新已安装的工具。
+
 - 服务端：`yuanqilei/s5a3-server`
 - 客户端：`yuanqilei/s5a3-client`
 - 登录器 / GM：`yuanqilei/purplemagic-nexus`
