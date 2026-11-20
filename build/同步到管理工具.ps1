@@ -37,6 +37,29 @@ if (-not $Version) {
 if (-not $Version) { throw "无法确定版本号，请用 -Version 指定" }
 Write-Host "版本: $Version" -ForegroundColor Cyan
 
+# 0.5) 一致性检查：源码里的 TOOL_VERSION（窗口标题）必须与版本资源一致
+$srcCandidates = @(
+    (Join-Path $Src "..\s5a3_deploy_tool.py"),          # tools/ 布局
+    (Join-Path $Src "..\src\s5a3_deploy_tool.py")      # 仓库布局
+)
+$srcFile = $srcCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+if ($srcFile) {
+    $m2 = Select-String -Path $srcFile -Pattern 'TOOL_VERSION\s*=\s*"([0-9.]+)"' | Select-Object -First 1
+    if ($m2) {
+        $titleVer = $m2.Matches[0].Groups[1].Value
+        if ($titleVer -ne $Version) {
+            Write-Host "[失败] 版本不一致：" -ForegroundColor Red
+            Write-Host "   version_info.txt : $Version"
+            Write-Host "   TOOL_VERSION     : $titleVer  ($srcFile)"
+            Write-Host "   发布前请同时改这两处，否则窗口标题与版本资源不符。"
+            exit 1
+        }
+        Write-Host "版本一致性: OK（$titleVer）" -ForegroundColor Green
+    }
+} else {
+    Write-Host "[警告] 未找到源码文件，跳过 TOOL_VERSION 检查" -ForegroundColor Yellow
+}
+
 # 1) 打包
 if (-not $SkipBuild) {
     Write-Host "[1/3] PyInstaller 打包…" -ForegroundColor Cyan
