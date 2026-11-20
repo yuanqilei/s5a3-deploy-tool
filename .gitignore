@@ -30,7 +30,10 @@ player_data/
 *.msi
 
 # 临时与构建产物
-build/
+# 本仓库的 build/ 是打包源文件（spec/图标/版本资源），不能忽略；忽略其产物子目录
+build/build/
+build/dist/
+build/out/
 dist/
 out/
 obj/

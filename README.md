@@ -6,6 +6,16 @@ S5A3 服务端部署工具：Python 源码、打包配置和输入素材，产�
 
 - 原始资料：`04_部署工具-S5A3服务端管理-v2026.11.19.1`
 
+## 构建
+
+```powershell
+cd build
+python -m PyInstaller --noconfirm --clean "S5A3服务端管理.spec"   # 产出 build/dist/S5A3服务端管理.exe
+```
+
+`build/` 是**源码目录**（spec、版本资源、图标、背景、同步脚本），必须在 Git 里；
+`build/build/`、`build/dist/`、`build/out/` 才是产物，已被忽略。
+
 ## 迁入范围
 
 - `src` 源码
