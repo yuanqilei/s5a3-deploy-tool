@@ -157,7 +157,7 @@ F_ENTRY = ("Consolas", 10)
 F_LOG = ("Consolas", 9)
 
 
-TOOL_VERSION = "2026.11.20.6"
+TOOL_VERSION = "2026.11.20.7"
 TOOL_BUILD = "2026-11-19"
 
 
@@ -2970,6 +2970,7 @@ done
 set -e
 if [ -d {q(cfg['pm_src'])}/.git ]; then
   cd {q(cfg['pm_src'])}
+  git config --global --add safe.directory {q(cfg['pm_src'])} 2>/dev/null || true
   git fetch --all --prune
   git reset --hard origin/HEAD 2>/dev/null || git reset --hard origin/main 2>/dev/null || git reset --hard origin/master
   echo "      当前提交：$(git log --oneline -1)"
@@ -3135,6 +3136,18 @@ fi
         cli = self._ssh(cfg)
         try:
             compose = self._pm_compose(cfg)
+            indexes = cfg["pm_data"].rstrip("/") + "/indexes"
+            # 索引器拒绝覆盖已存在的 pvf.bin，先归档旧索引再重建
+            self._log("      归档旧索引（index-backups/<时间戳>）…")
+            archive = (
+                "ts=$(date +%Y%m%d-%H%M%S); "
+                "if [ -f {0}/pvf.bin ]; then mkdir -p {0}/index-backups/$ts && "
+                "mv {0}/pvf.bin {0}/index-backups/$ts/ && "
+                "echo \"      已归档 pvf.bin -> index-backups/$ts\"; fi"
+            ).format(q(indexes))
+            rc = cli.run(archive, self._line_cb, timeout=300)
+            if rc != 0:
+                raise RuntimeError("归档旧索引失败")
             for step in ("index-pvf", "index-items", "index-quests", "index-professions"):
                 self._log("      >>> %s" % step)
                 rc = cli.run(compose + " --profile setup run --rm " + step,
