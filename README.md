@@ -41,3 +41,17 @@ python -m PyInstaller --noconfirm --clean "S5A3服务端管理.spec"   # 产出 
 - 服务端：`yuanqilei/s5a3-server`
 - 客户端：`yuanqilei/s5a3-client`
 - 登录器 / GM：`yuanqilei/purplemagic-nexus`
+
+## 纯净版发布（给他人使用）
+
+对外只发 **exe + 使用说明 + 版本信息 + SHA256SUMS**，不含任何源码：
+
+```powershell
+cd build
+pwsh -File .\同步到管理工具.ps1            # 打包 → 清空目标目录 → 只写 4 个文件 → 自检 → 校验哈希
+pwsh -File .\同步到管理工具.ps1 -SkipBuild  # 只发布已有产物
+```
+
+- 目标目录默认 `C:\DNF\管理工具\S5A3服务端管理工具`，每次发布**整体覆盖**；
+- `publish_clean.py` 会自检：目录内出现 `.py/.spec/.ps1/.ico/.jpg` 等一律报错退出；
+- 版本号取自 `version_info.txt` 的 `filevers`，发布前务必先改它。
