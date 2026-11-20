@@ -157,7 +157,7 @@ F_ENTRY = ("Consolas", 10)
 F_LOG = ("Consolas", 9)
 
 
-TOOL_VERSION = "2026.11.20.8"
+TOOL_VERSION = "2026.11.20.9"
 TOOL_BUILD = "2026-11-19"
 
 
@@ -1143,11 +1143,9 @@ class App:
         r += 1
 
         self._page_actions(form, r, [
-            ("检测连接", lambda: self._start(self.do_test), False, False),
-            ("一键部署", self._confirm_deploy, True, True),
-            ("更新服务端", self._confirm_update, False, True),
+            ("一键体检", lambda: self._start(self.do_health), True, False),
+            ("部署 / 更新", self._confirm_deploy, True, True),
             ("替换 PVF", self._confirm_pvf, False, True),
-            ("查看状态", lambda: self._start(self.do_status), False, False),
             ("停止服务", lambda: self._start(self.do_server_stop), False, False),
             ("启动服务", lambda: self._start(self.do_server_start), False, False),
         ])
@@ -1163,8 +1161,7 @@ class App:
                        warn=True)
         r = self._hint(form, r, "初始 = 新服首次导入（不先备份）　替换 = 先整库备份再覆盖　恢复 = 从本机备份还原")
         self._page_actions(form, r, [
-            ("导入初始库", self._db_import_initial, True, True),
-            ("替换数据库", self._db_replace, False, True),
+            ("导入数据库", self._db_import_merged, True, True),
             ("备份数据库", lambda: self._start(self._db_backup), False, False),
             ("恢复备份", self._db_restore, False, True),
         ])
@@ -1207,12 +1204,8 @@ class App:
         r = self._hint(form, r, "zip 内只允许 client/ 下的文件（登录器 PurpleMagic.exe 可放根）；发布后玩家开登录器自动整包更新")
         r = self._hint(form, r, "上传后玩家从 /launcher/PurpleMagic.exe 下载；发布目录留空会先探测网关配置")
         self._page_actions(form, r, [
-            ("上传登录器", self._launcher_upload, False, False),
-            ("通讯验证", lambda: self._start(self.do_verify), True, False),
-            ("检查通讯文件", lambda: self._start(self.do_profile_check), False, False),
+            ("发布", self._publish_confirm, True, True),
             ("生成通讯文件", self._profile_generate_confirm, False, True),
-            ("检查更新包", lambda: self._start(self.do_pack_check), False, False),
-            ("发布更新包", self._pack_publish_confirm, False, True),
             ("启动登录器", lambda: self._start(self.do_launcher), False, False),
         ])
         return self._finish_page(form, pw, 2)
@@ -1235,7 +1228,6 @@ class App:
         self._page_actions(form, r, [
             ("部署 GM", self._pm_deploy_confirm, True, True),
             ("重置管理 Token", self._pm_token_confirm, False, True),
-            ("后台状态", lambda: self._start(self.do_gm_status), False, False),
             ("重建索引", self._pm_reindex_confirm, False, True),
             ("停止网关", lambda: self._start(self.do_pm_stop), False, False),
             ("启动网关", lambda: self._start(self.do_pm_start), False, False),
@@ -2753,6 +2745,13 @@ echo "导入完成"
                              "先整库备份（服务器+本机），再停服导入。"],
                             f"{cfg['path']} / 库 {DB_NAME}"))
 
+    def _db_import_merged(self):
+        """导入数据库（合并了原来"初始导入"与"替换"）：一律先整库备份再导入。"""
+        local = self._ask_db_file("选择要导入的数据库（.sql / .sql.gz）")
+        if not local:
+            return
+        self._start(lambda c: self._db_run(c, local, True, "导入数据库"))
+
     def _db_restore(self):
         cfg = self._read_form()
         d = os.path.join(self._backup_root(cfg), "db")
@@ -2798,6 +2797,27 @@ if [ -d {q(cfg['patch_dir'])} ]; then ls -1 {q(cfg['patch_dir'])}; else echo '�
             cli.close()
 
     # ---------------- 通讯文件验证 ----------------
+    def do_health(self, cfg):
+        """一键体检：把原来分散的 5 个只读检查串起来跑一遍。"""
+        self._log("== 一键体检（全部只读） ==", "gold")
+        steps = (
+            ("连接与游戏端口", self.do_test),
+            ("服务端容器", self.do_status),
+            ("网关与通讯", self.do_verify),
+            ("通讯档案（profile）", self.do_profile_check),
+            ("客户端更新包", self.do_pack_check),
+            ("网关状态", self.do_gm_status),
+        )
+        failed = 0
+        for name, fn in steps:
+            self._log("—— %s ——" % name, "gold")
+            try:
+                fn(cfg)
+            except Exception as exc:
+                failed += 1
+                self._log("[跳过] %s：%s" % (name, exc), "err")
+        self._log("== 体检结束（%d 项有异常） ==" % failed, "ok" if not failed else "err")
+
     def do_verify(self, cfg):
         """只读：核对跨端必须一致的几份文件，不改任何东西。"""
         self._log("== 通讯文件验证（只读） ==", "gold")
@@ -3257,6 +3277,14 @@ fi
             if m:
                 return m.group(1)
         return ""
+
+    def _publish_confirm(self):
+        """发布（合并了原来"上传登录器"与"发布更新包"）：填了更新包就发更新包，否则发登录器。"""
+        cfg = self._read_form()
+        if (cfg.get("pack_src") or "").strip():
+            self._pack_publish_confirm()
+        else:
+            self._launcher_upload()
 
     def _launcher_upload(self):
         cfg = self._read_form()
