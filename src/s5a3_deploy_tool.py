@@ -154,7 +154,7 @@ F_ENTRY = ("Consolas", 10)
 F_LOG = ("Consolas", 9)
 
 
-TOOL_VERSION = "2026.11.20.4"
+TOOL_VERSION = "2026.11.20.5"
 TOOL_BUILD = "2026-11-19"
 
 
@@ -1858,8 +1858,14 @@ rm -rf "$STAGE" "$TMP"
         """Generated runtime is private state, not a source repository input."""
         p = cfg["path"]
         rc, _ = cli.capture(f"test -f {q(posixpath.join(p, 'runtime/docker/.s5a3-prepare-incomplete'))}")
-        if rc == 0:
-            raise RuntimeError("上次运行配置初始化未完成，已停止启动；请核对生成器错误并恢复/补齐配置后移除 .s5a3-prepare-incomplete 标记")
+        incomplete = rc == 0
+        if incomplete:
+            _, state = cli.capture(f"head -c 256 {q(posixpath.join(p, 'runtime/docker/.s5a3-prepare-incomplete'))}")
+            fields = dict(line.split("=", 1) for line in (state or "").splitlines() if "=" in line)
+            phase = {"build_image": "构建镜像", "prepare": "首次生成配置", "recommended": "合并推荐配置", "final_prepare": "生成最终配置"}.get(fields.get("stage"), "旧版未记录阶段")
+            self._log("      检测到上次初始化中断：" + phase, "warn")
+            if not initialize:
+                raise RuntimeError("运行配置初始化未完成（" + phase + "）；请使用一键部署检查并恢复，更新模式不会重建配置")
         need = [COMPOSE, "runtime/docker/server.env", "runtime/docker/database.env"]
         missing = []
         for rel in need:
@@ -1869,8 +1875,8 @@ rm -rf "$STAGE" "$TMP"
         rc, _ = cli.capture(f"test -f {q(posixpath.join(p, 'runtime/docker/Dockerfile.deploy'))} || test -f {q(posixpath.join(p, 'deploy/docker/Dockerfile'))}")
         if rc != 0:
             raise RuntimeError("源码缺少构建文件：deploy/docker/Dockerfile（或旧版 runtime/docker/Dockerfile.deploy）")
-        if missing and initialize:
-            if len(missing) != len(need):
+        if initialize and (missing or incomplete):
+            if not incomplete and len(missing) != len(need):
                 raise RuntimeError("已有运行配置不完整：" + "、".join(missing) + "；请恢复配置备份，未自动重建密码")
             self._prepare_runtime(cli, cfg)
             missing = []
@@ -1884,17 +1890,16 @@ rm -rf "$STAGE" "$TMP"
         self._log("      必需文件齐全", "ok")
 
     def _prepare_runtime(self, cli, cfg):
-        """Only bootstrap a new installation; never regenerate existing state."""
-        self._log("      首次部署：构建资源提取器并生成运行配置（不启动容器）…", "gold")
+        """Bootstrap or resume an interrupted new installation, preserving identity."""
+        self._log("      检查首次部署/恢复条件并准备运行配置（不启动容器）…", "gold")
         script = f"""
 set -e
 cd {q(cfg['path'])}
 for f in deploy/docker/manage.py deploy/docker/Dockerfile deploy/templates/docker-instance.recommended.json; do
   [ -f "$f" ] || {{ echo "[错误] 缺少官方配置生成器或推荐配置：$f"; exit 1; }}
 done
-[ ! -e runtime/docker/instance.json ] || {{ echo "[错误] 已有 instance.json，拒绝自动重建；请恢复原运行配置"; exit 1; }}
 if docker inspect {DB_C} >/dev/null 2>&1 || docker inspect {SERVER_C} >/dev/null 2>&1; then
-  echo "[错误] 已有游戏/数据库容器但运行配置缺失，请先恢复备份，不能生成新密码"
+  echo "[错误] 已有游戏/数据库容器，拒绝按新安装重建配置；请恢复原配置备份"
   exit 1
 fi
 VOLUMES=$(docker volume ls --filter label=com.docker.compose.project=servers5a3 -q)
@@ -1907,10 +1912,63 @@ if [ -d runtime/docker/server ] && [ -n "$(find runtime/docker/server -mindepth 
   exit 1
 fi
 [ -s runtime/docker/data/Script.pvf ] || {{ echo "[错误] 首次初始化需要 Script.pvf，请填写部署 PVF 后重试"; exit 1; }}
-: > runtime/docker/.s5a3-prepare-incomplete
-python3 deploy/docker/manage.py build --image servers5a3:launcher --project servers5a3
-python3 deploy/docker/manage.py prepare --image servers5a3:launcher --project servers5a3
-python3 - <<'PY'
+command -v python3 >/dev/null 2>&1 || {{ echo "[错误] 服务器缺少 python3"; exit 1; }}
+python3 - <<'STATE'
+import json, re, shutil, time
+from pathlib import Path
+root = Path('runtime/docker')
+instance = root / 'instance.json'
+marker = root / '.s5a3-prepare-incomplete'
+files = [root / name for name in ('compose.json', 'server.env', 'database.env')]
+if instance.exists():
+    if not marker.exists():
+        raise SystemExit('已有 instance.json 且无中断标记，拒绝作为首次安装重建')
+    config = json.loads(instance.read_text(encoding='utf-8'))
+    for key in ('database_password', 'root_password', 'admin_token'):
+        if not isinstance(config.get(key), str) or not re.fullmatch('[0-9a-f]+', config[key]):
+            raise SystemExit('原部署身份字段无效，请恢复 instance.json 备份；未生成新密码')
+    env = root / 'database.env'
+    if env.exists():
+        values = dict(line.split('=', 1) for line in env.read_text().splitlines() if '=' in line and not line.startswith('#'))
+        if values.get('MARIADB_ROOT_PASSWORD') != config['root_password'] or values.get('MARIADB_PASSWORD') != config['database_password']:
+            raise SystemExit('database.env 与 instance.json 口令不一致，拒绝覆盖，请恢复一致的备份')
+    backup = root / 'prepare-backups' / str(time.time_ns())
+    backup.mkdir(parents=True, mode=0o700)
+    backup.chmod(0o700)
+    for path in [instance, marker, *files]:
+        if path.is_file():
+            shutil.copy2(path, backup / path.name)
+    print('已备份中断配置；将复用原实例身份、数据库口令和管理令牌')
+elif any(path.exists() for path in files):
+    raise SystemExit('缺少 instance.json 但已有环境文件，拒绝生成新密码，请恢复原配置')
+else:
+    print('配置尚未生成，通过旧容器/数据库卷检查后可安全重试')
+STATE
+mkdir -p runtime/docker/.prepare-state
+chmod 700 runtime/docker/.prepare-state
+run_stage() {{
+  PHASE=$1
+  shift
+  printf 'stage=%s\\nstatus=running\\n' "$PHASE" > runtime/docker/.s5a3-prepare-incomplete
+  echo "      初始化阶段：$PHASE"
+  : > runtime/docker/.prepare-state/status
+  (
+    set +e
+    "$@"
+    RESULT=$?
+    printf '%s\\n' "$RESULT" > runtime/docker/.prepare-state/status
+    exit "$RESULT"
+  ) 2>&1 | tee runtime/docker/.prepare-state/last.log
+  CODE=$(cat runtime/docker/.prepare-state/status)
+  case "$CODE" in ''|*[!0-9]*) echo "[错误] 初始化子进程退出状态未写入，已停止"; return 1 ;; esac
+  [ "$CODE" -ne 0 ] || return 0
+  printf 'stage=%s\\nstatus=failed\\ncode=%s\\n' "$PHASE" "$CODE" > runtime/docker/.s5a3-prepare-incomplete
+  echo "[错误] 初始化阶段 $PHASE 失败（退出码 $CODE）；详细日志：runtime/docker/.prepare-state/last.log"
+  return "$CODE"
+}}
+run_stage build_image python3 deploy/docker/manage.py build --image servers5a3:launcher --project servers5a3
+run_stage prepare python3 deploy/docker/manage.py prepare --image servers5a3:launcher --project servers5a3
+run_stage recommended python3 - <<'PY'
 import json, os
 from pathlib import Path
 path = Path('runtime/docker/instance.json')
@@ -1924,12 +1982,12 @@ temporary = path.with_suffix('.json.prepared')
 temporary.write_text(json.dumps(merged, indent=2) + '\\n', encoding='utf-8')
 os.replace(temporary, path)
 PY
-python3 deploy/docker/manage.py prepare --image servers5a3:launcher --project servers5a3
+run_stage final_prepare python3 deploy/docker/manage.py prepare --image servers5a3:launcher --project servers5a3
 rm -f runtime/docker/.s5a3-prepare-incomplete
 echo "      首次运行配置已生成，已应用官方推荐配置；未启动或删除任何容器/数据库卷"
 """
         if cli.run(script, self._line_cb, timeout=3600) != 0:
-            raise RuntimeError("首次运行配置准备失败，未启动服务；请查看上方具体错误并保留现场")
+            raise RuntimeError("运行配置准备失败，未启动服务；具体阶段和原始错误已显示在上方，日志保留在 runtime/docker/.prepare-state/last.log")
 
     def _ensure_pvf(self, cli, cfg):
         remote = self._rp(cfg, PVF_REL)

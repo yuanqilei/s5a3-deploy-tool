@@ -25,13 +25,17 @@ class SSH:
         self.closed = False
 
     def capture(self, command):
+        if command.startswith("head -c"):
+            return 0, "stage=build_image\nstatus=failed\ncode=1\n"
         paths = [shlex.split(part)[2] for part in command.split(" || ")]
         return (0 if any(p.removeprefix("/fixture/") in self.files for p in paths) else 1), ""
 
     def run(self, command, callback, timeout):
         self.commands.append(command)
         if self.failure: return 1
-        if "manage.py prepare" in command: self.files.update(RUNTIME)
+        if "manage.py prepare" in command:
+            self.files.update(RUNTIME)
+            self.files.discard("runtime/docker/.s5a3-prepare-incomplete")
         return 0
 
     def close(self): self.closed = True
@@ -78,11 +82,54 @@ class RuntimePreparationTests(unittest.TestCase):
             with self.assertRaises(RuntimeError): Tool(cli)._check_runtime(cli, self.cfg, initialize)
             self.assertEqual(cli.commands, [])
 
-    def test_failed_previous_prepare_cannot_be_mistaken_for_ready_runtime(self):
+    def test_interrupted_initialization_is_not_silently_used_in_update_mode(self):
         cli = SSH(RUNTIME | {"deploy/docker/Dockerfile", "runtime/docker/.s5a3-prepare-incomplete"})
-        with self.assertRaisesRegex(RuntimeError, "初始化未完成"):
-            Tool(cli)._check_runtime(cli, self.cfg, initialize=True)
+        with self.assertRaisesRegex(RuntimeError, "初始化未完成.*构建镜像"):
+            Tool(cli)._check_runtime(cli, self.cfg, initialize=False)
         self.assertEqual(cli.commands, [])
+
+    def test_empty_legacy_marker_allows_guarded_retry_without_configuration(self):
+        cli = SSH({"deploy/docker/Dockerfile", "runtime/docker/.s5a3-prepare-incomplete"})
+        Tool(cli)._check_runtime(cli, self.cfg, initialize=True)
+        self.assertTrue(RUNTIME.issubset(cli.files))
+        self.assertNotIn("runtime/docker/.s5a3-prepare-incomplete", cli.files)
+        self.assertEqual(len(cli.commands), 1)
+
+    def test_retry_failure_keeps_marker_and_never_starts_services(self):
+        cli = SSH({"deploy/docker/Dockerfile", "runtime/docker/.s5a3-prepare-incomplete"}, failure=True)
+        with self.assertRaisesRegex(RuntimeError, "具体阶段和原始错误"):
+            Tool(cli)._check_runtime(cli, self.cfg, initialize=True)
+        self.assertIn("runtime/docker/.s5a3-prepare-incomplete", cli.files)
+        self.assertFalse(any(" up -d " in command for command in cli.commands))
+
+    def test_resume_validates_existing_credentials_and_backs_up_without_changing_them(self):
+        cli = SSH(set())
+        Tool(cli)._prepare_runtime(cli, self.cfg)
+        code = cli.commands[0].split("python3 - <<'STATE'\n", 1)[1].split("\nSTATE\n", 1)[0]
+        compile(code, "resume-validation", "exec")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "runtime/docker"; root.mkdir(parents=True)
+            config = {"root_password": "a" * 48, "database_password": "b" * 48, "admin_token": "c" * 64, "host_ip": "192.168.1.2"}
+            instance = root / "instance.json"; instance.write_text(json.dumps(config))
+            env = root / "database.env"
+            env.write_text("MARIADB_ROOT_PASSWORD=" + config["root_password"] + "\nMARIADB_PASSWORD=" + config["database_password"] + "\n")
+            marker = root / ".s5a3-prepare-incomplete"; marker.write_text("")
+            before = instance.read_bytes(), env.read_bytes()
+            previous = Path.cwd()
+            try:
+                os.chdir(temp); exec(code, {})
+                self.assertEqual((instance.read_bytes(), env.read_bytes()), before)
+                backups = list((root / "prepare-backups").iterdir())
+                self.assertEqual(len(backups), 1)
+                self.assertEqual((backups[0] / "instance.json").read_bytes(), before[0])
+                env.write_text("MARIADB_ROOT_PASSWORD=inconsistent\n")
+                with self.assertRaisesRegex(SystemExit, "口令不一致"): exec(code, {})
+                self.assertEqual(instance.read_bytes(), before[0])
+                marker.unlink()
+                with self.assertRaisesRegex(SystemExit, "无中断标记"): exec(code, {})
+                instance.unlink()
+                with self.assertRaisesRegex(SystemExit, "缺少 instance.json"): exec(code, {})
+            finally: os.chdir(previous)
 
     def test_prepare_failure_prevents_container_start(self):
         cli = SSH({"deploy/docker/Dockerfile"}, failure=True)
