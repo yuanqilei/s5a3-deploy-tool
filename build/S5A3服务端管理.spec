@@ -1,11 +1,23 @@
 # -*- mode: python ; coding: utf-8 -*-
+from pathlib import Path
+import ssl
+
+# Some build interpreters require additional public trust data from ssl.py.
+# Preserve that policy in frozen builds rather than omitting its companion file.
+ssl_module = Path(ssl.__file__)
+ssl_companion = ssl_module.with_name('codex-rejected-cas.pem')
+extra_data = []
+if ssl_companion.is_file():
+    extra_data.append((str(ssl_companion), '.'))
+elif ssl_module.is_file() and 'codex-rejected-cas.pem' in ssl_module.read_text(encoding='utf-8'):
+    raise RuntimeError('Required SSL companion data is missing in the build interpreter')
 
 
 a = Analysis(
     [str(SPECPATH + '/../src/s5a3_deploy_tool.py')],
     pathex=[str(SPECPATH + '/../src')],
     binaries=[],
-    datas=[('S5A3BG.jpg', '.')],
+    datas=[('S5A3BG.jpg', '.'), *extra_data],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

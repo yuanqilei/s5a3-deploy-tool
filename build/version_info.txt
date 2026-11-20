@@ -1,7 +1,7 @@
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(2026, 11, 20, 5),
-    prodvers=(2026, 11, 20, 5),
+    filevers=(2026, 11, 20, 6),
+    prodvers=(2026, 11, 20, 6),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -14,11 +14,11 @@ VSVersionInfo(
       StringTable('080404B0', [
         StringStruct('CompanyName', 'S5A3'),
         StringStruct('FileDescription', 'S5A3 服务端管理工具'),
-        StringStruct('FileVersion', '2026.11.20.5'),
+        StringStruct('FileVersion', '2026.11.20.6'),
         StringStruct('InternalName', 'S5A3服务端管理'),
         StringStruct('OriginalFilename', 'S5A3服务端管理.exe'),
         StringStruct('ProductName', 'S5A3 服务端管理'),
-        StringStruct('ProductVersion', '2026.11.20.5'),
+        StringStruct('ProductVersion', '2026.11.20.6'),
         StringStruct('LegalCopyright', 'internal use')
       ])
     ]),

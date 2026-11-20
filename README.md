@@ -26,7 +26,9 @@ python -m PyInstaller --noconfirm --clean "S5A3服务端管理.spec"   # 产出 
 
 `2026.11.20.3` 增加签名自动更新：启动后台检查、用户确认安装、任务期间禁止替换、新版启动失败回滚、保留本机配置。首次需手动换装支持更新的新 EXE；发布与签名方法见 [自动更新说明](docs/AUTO_UPDATE.md)。
 
-最新 exe 见 [v2026.11.20.5](https://github.com/yuanqilei/s5a3-deploy-tool/releases/tag/v2026.11.20.5)：`S5A3-ServerManager-2026.11.20.5.exe`（36,301,486 B / sha256 `01f00d31…`，附签名更新清单和 `SHA256SUMS.txt`）。
+最新 exe 见 [v2026.11.20.6](https://github.com/yuanqilei/s5a3-deploy-tool/releases/tag/v2026.11.20.6)：`S5A3-ServerManager-2026.11.20.6.exe`（36,305,398 B / sha256 `6a36e329…`，附签名更新清单和 `SHA256SUMS.txt`）。
+
+`2026.11.20.6` 修复实际 EXE 的 HTTPS 更新检查缺少 SSL 数据问题，增加 SSH 分阶段错误与自动脱敏本机日志。旧版出现更新检查“文件不存在”时需手动换装本版。实际 EXE SSL/签名更新联网自检和界面启动通过，24 项隔离回归通过；服务器不发送 SSH 标识仍需核查 sshd 和网络。详见 [连接诊断](docs/CONNECTION_DIAGNOSTICS.md)。
 
 `2026.11.20.5` 允许在严格检查旧容器/数据库卷后安全恢复中断的首次安装，备份并复用已有实例口令，同时记录和实时显示真正失败的阶段及原始输出。
 

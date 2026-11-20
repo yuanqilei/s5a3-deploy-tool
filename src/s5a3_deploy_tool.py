@@ -24,14 +24,17 @@ import queue
 import re
 import secrets
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import traceback
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import self_update
+from local_diagnostics import SessionLog
 
 try:
     import paramiko
@@ -154,7 +157,7 @@ F_ENTRY = ("Consolas", 10)
 F_LOG = ("Consolas", 9)
 
 
-TOOL_VERSION = "2026.11.20.5"
+TOOL_VERSION = "2026.11.20.6"
 TOOL_BUILD = "2026-11-19"
 
 
@@ -315,10 +318,28 @@ class SSHClient:
     def connect(self):
         self.client = paramiko.SSHClient()
         self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        self.client.connect(
-            self.host, port=22, username=self.user, password=self.password,
-            timeout=15, look_for_keys=False, allow_agent=False,
-        )
+        connection = None
+        stage = "连接端口"
+        try:
+            connection = socket.create_connection((self.host, 22), timeout=10)
+            stage = "SSH 握手/认证"
+            self.client.connect(
+                self.host, port=22, username=self.user, password=self.password,
+                sock=connection, timeout=60, banner_timeout=30, auth_timeout=30,
+                channel_timeout=30, look_for_keys=False, allow_agent=False,
+            )
+        except Exception as error:
+            self.client.close()
+            self.client = None
+            if connection is not None:
+                connection.close()
+            if isinstance(error, paramiko.AuthenticationException):
+                raise RuntimeError("SSH 认证失败：请核对用户名、密码或服务器登录策略") from error
+            if isinstance(error, paramiko.BadHostKeyException):
+                raise RuntimeError("SSH 主机身份校验失败，请核对服务器主机密钥") from error
+            if "banner" in str(error).lower() or "No existing session" in str(error):
+                raise RuntimeError("22 端口连接后未完成 SSH 握手，尚未验证密码；请检查服务器 sshd 状态及网络链路") from error
+            raise RuntimeError("SSH " + stage + "失败：" + str(error)) from error
         return self
 
     def run(self, command, on_line=None, timeout=3600, collect=False):
@@ -726,6 +747,7 @@ class App:
     def __init__(self, root):
         self.root = root
         self.cfg = load_config()
+        self.session_log = SessionLog()
         self._last_gm_password = ""
         self.log_queue = queue.Queue()
         self.busy = False
@@ -754,6 +776,7 @@ class App:
         self._pump_log()
         self._apply_bg()
         self.root.bind("<Configure>", self._on_resize)
+        self._log("工具版本：" + TOOL_VERSION + "；本机日志：" + str(self.session_log.path or "日志目录不可写"))
         self._update_checking = False
         self._update_checked = False
         self._available_update = None
@@ -872,6 +895,8 @@ class App:
         self.st_right.pack(side="right")
         tk.Button(bar, text="检查更新", command=lambda: self._check_update(True),
                   bg=C_PANEL_HI, fg=C_TEXT, relief="flat", font=F_HINT).pack(side="right", padx=10)
+        tk.Button(bar, text="打开日志目录", command=lambda: os.startfile(str(self.session_log.directory)),
+                  bg=C_PANEL_HI, fg=C_TEXT, relief="flat", font=F_HINT).pack(side="right", padx=5)
         self.st_conn = tk.Label(bar, text="● 未连接", bg=C_PANEL, fg=C_DANGER, font=F_HINT)
         self.st_conn.pack(side="left")
         self.st_mid = tk.Label(bar, text="就绪", bg=C_PANEL, fg=C_DIM, font=F_HINT)
@@ -1270,6 +1295,7 @@ class App:
 
     # ---------------- 日志 / 状态 ----------------
     def _log(self, msg, tag=None):
+        msg = self.session_log.write(msg, [self.cfg.get("password", "")])
         self.log_queue.put((self.log_sink_page, msg, tag))
 
     def _pump_log(self):
@@ -1336,6 +1362,7 @@ class App:
                 result = self_update.check(TOOL_VERSION)
                 self.ui_queue.put(("update-check", result, "", manual))
             except Exception as error:
+                self.session_log.write(traceback.format_exc(), [self.cfg.get("password", "")])
                 self.ui_queue.put(("update-check", None, str(error), manual))
         threading.Thread(target=check, daemon=True).start()
 
@@ -1488,6 +1515,7 @@ class App:
             fn(cfg)
             ok = True
         except Exception as e:
+            self.session_log.write(traceback.format_exc(), [self.cfg.get("password", "")])
             self._log(f"[错误] {e}", "err")
         finally:
             self.busy = False
@@ -3578,6 +3606,20 @@ fi
 
 
 def main():
+    if "--network-selftest" in sys.argv:
+        import ssl
+        report = {"version": TOOL_VERSION}
+        try:
+            ssl.create_default_context()
+            report["sslContext"] = "ok"
+            self_update.check(TOOL_VERSION)
+            report["signedUpdateCheck"] = "ok"
+        except Exception:
+            report["error"] = traceback.format_exc()
+        path = sys.argv[sys.argv.index("--network-selftest") + 1]
+        with open(path, "w", encoding="utf-8") as output:
+            json.dump(report, output, ensure_ascii=False, indent=2)
+        raise SystemExit(1 if "error" in report else 0)
     if "--apply-update" in sys.argv:
         raise SystemExit(self_update.apply(sys.argv[sys.argv.index("--apply-update") + 1]))
     if "--selftest" in sys.argv:

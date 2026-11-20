@@ -3,12 +3,8 @@
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
-python -m PyInstaller --noconfirm --clean --onefile --windowed `
-  --name "S5A3服务端管理" `
-  --icon "S5A3工具图标.ico" `
-  --version-file "version_info.txt" `
-  --add-data "S5A3BG.jpg;." `
-  ..\src\s5a3_deploy_tool.py
+python -m PyInstaller --noconfirm --clean "S5A3服务端管理.spec"
+if ($LASTEXITCODE -ne 0) { throw "PyInstaller 构建失败" }
 
 Write-Host ""
 Write-Host "产物: dist\S5A3服务端管理.exe"
