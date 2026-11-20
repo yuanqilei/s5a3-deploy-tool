@@ -157,7 +157,7 @@ F_ENTRY = ("Consolas", 10)
 F_LOG = ("Consolas", 9)
 
 
-TOOL_VERSION = "2026.11.20.7"
+TOOL_VERSION = "2026.11.20.8"
 TOOL_BUILD = "2026-11-19"
 
 
@@ -1148,6 +1148,8 @@ class App:
             ("更新服务端", self._confirm_update, False, True),
             ("替换 PVF", self._confirm_pvf, False, True),
             ("查看状态", lambda: self._start(self.do_status), False, False),
+            ("停止服务", lambda: self._start(self.do_server_stop), False, False),
+            ("启动服务", lambda: self._start(self.do_server_start), False, False),
         ])
         return self._finish_page(form, pw, 0)
 
@@ -1235,6 +1237,8 @@ class App:
             ("重置管理 Token", self._pm_token_confirm, False, True),
             ("后台状态", lambda: self._start(self.do_gm_status), False, False),
             ("重建索引", self._pm_reindex_confirm, False, True),
+            ("停止网关", lambda: self._start(self.do_pm_stop), False, False),
+            ("启动网关", lambda: self._start(self.do_pm_start), False, False),
             ("打开后台", self._open_panel, False, False),
         ])
         return self._finish_page(form, pw, 3)
@@ -1451,10 +1455,7 @@ class App:
             self._log("      目录权限不足时可把 exe 放到可写目录再试", "err")
 
     def _reset_cfg_click(self):
-        if not messagebox.askyesno("重置配置",
-                                   "将清空本机保存的全部字段（IP、密码、路径等），恢复默认值。\n"
-                                   "继续？", parent=self.root):
-            return
+        # 二次确认已按需求移除：直接重置
         removed = []
         for path in (CONFIG_PATH, CONFIG_FALLBACK):
             try:
@@ -1485,14 +1486,7 @@ class App:
         if not cfg["host"] or not cfg["password"]:
             messagebox.showwarning("缺少配置", "请填写服务器 IP 和 root 密码", parent=self.root)
             return
-        if danger:
-            if not self._ask_danger(*danger):
-                self._active_btn = None
-                return
-        elif confirm:
-            if not messagebox.askyesno(confirm[0], confirm[1], parent=self.root):
-                self._active_btn = None
-                return
+        # 二次确认已按需求移除：confirm/danger 参数保留仅为兼容旧调用点
         self.busy = True
         self._t0 = time.time()
         self.log_sink_page = self.log_target
@@ -2166,6 +2160,95 @@ if [ -d {q(cfg['patch_dir'])} ]; then echo "      补丁目录：已存在"; els
 """
             cli.run(script, self._line_cb, timeout=60)
             self._log("== 检测完成 ==", "ok")
+        finally:
+            cli.close()
+
+    def do_server_stop(self, cfg):
+        self._log("== 停止游戏服 ==", "gold")
+        cli = self._ssh(cfg)
+        try:
+            self._require_compose(cli, cfg)
+            script = (f"cd {q(cfg['path'])} && "
+                      f"docker compose -p servers5a3 -f {COMPOSE} stop 2>&1 && "
+                      f"docker compose -p servers5a3 -f {COMPOSE} ps 2>&1")
+            rc = cli.run(script, self._line_cb, timeout=600)
+            if rc != 0:
+                raise RuntimeError("停止游戏服失败")
+            self._log("== 已停止（容器与数据库卷保留，数据不丢） ==", "ok")
+            self._log("      再次点「启动服务」即可恢复；「一键部署」也能拉起来。", "gold")
+        finally:
+            cli.close()
+
+    def do_server_start(self, cfg):
+        self._log("== 启动游戏服 ==", "gold")
+        cli = self._ssh(cfg)
+        try:
+            self._require_compose(cli, cfg)
+            script = (f"cd {q(cfg['path'])} && "
+                      f"docker compose -p servers5a3 -f {COMPOSE} start 2>&1 && "
+                      f"docker compose -p servers5a3 -f {COMPOSE} ps 2>&1")
+            rc = cli.run(script, self._line_cb, timeout=600)
+            if rc != 0:
+                raise RuntimeError("启动游戏服失败")
+            self._verify_server_up(cli, cfg)
+            self._log("== 游戏服已启动 ==", "ok")
+        finally:
+            cli.close()
+
+    def _require_compose(self, cli, cfg):
+        rc, out = cli.capture("test -f %s/runtime/docker/compose.json && echo ok" % q(cfg["path"]))
+        if "ok" not in (out or ""):
+            raise RuntimeError("服务端还没部署过（没有 runtime/docker/compose.json），请先「一键部署」")
+
+    def _verify_server_up(self, cli, cfg):
+        # 启动后游戏服要跑完 healthcheck（约 1 分钟）才算可用
+        script = (
+            f"cd {q(cfg['path'])} && "
+            "for i in $(seq 1 36); do "
+            "  st=$(docker inspect -f '{{.State.Health.Status}}' servers5a3-server-1 2>/dev/null || echo unknown); "
+            "  echo \"      health=$st\"; "
+            "  [ \"$st\" = healthy ] && break; "
+            "  sleep 5; "
+            "done; "
+            f"docker compose -p servers5a3 -f {COMPOSE} ps --format '{{{{.Name}}}} {{{{.Status}}}}' 2>&1 | head -5; "
+            "ss -tln 2>/dev/null | grep -c ':7001 ' || true"
+        )
+        cli.run(script, self._line_cb, timeout=300)
+
+    def do_pm_stop(self, cfg):
+        self._log("== 停止网关（gateway / gm / edge） ==", "gold")
+        cli = self._ssh(cfg)
+        try:
+            compose = self._pm_compose(cfg)
+            rc = cli.run(compose + " stop gateway gm edge 2>&1", self._line_cb, timeout=600)
+            if rc != 0:
+                raise RuntimeError("停止网关失败")
+            cli.run(compose + " ps --format '{{.Name}} {{.Status}}' 2>&1 | head -6",
+                    self._line_cb, timeout=120)
+            self._log("== 网关已停止（数据目录 data2 不动，玩家 API 暂时不可用） ==", "ok")
+        finally:
+            cli.close()
+
+    def do_pm_start(self, cfg):
+        self._log("== 启动网关（gateway / gm / edge） ==", "gold")
+        cli = self._ssh(cfg)
+        try:
+            compose = self._pm_compose(cfg)
+            rc = cli.run(compose + " start gateway gm edge 2>&1", self._line_cb, timeout=600)
+            if rc != 0:
+                raise RuntimeError("启动网关失败")
+            # 等 gateway 真正应答（游戏服可能仍在 healthcheck）
+            wait = (
+                "for i in $(seq 1 36); do "
+                " code=$(curl -sk -o /dev/null -w '%{http_code}' -m 5 https://127.0.0.1:8443/api/status || true); "
+                " echo \"      api/status=$code\"; "
+                " [ \"$code\" = 200 ] && break; "
+                " sleep 5; "
+                "done"
+            )
+            cli.run(wait, self._line_cb, timeout=300)
+            self._verify_pm(cli, cfg)
+            self._log("== 网关已启动 ==", "ok")
         finally:
             cli.close()
 
