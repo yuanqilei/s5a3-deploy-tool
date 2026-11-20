@@ -90,7 +90,7 @@ DEFAULTS = {
     "host": "",
     "user": "root",
     "password": "",
-    "repo": "git@github-qingqing:yuanqilei/qingqing.git",
+    "repo": "https://github.com/yuanqilei/s5a3-server.git",
     "local_pkg": "",
     "path": "/opt/servers5a3",
     "patch_dir": "/opt/s5a3-patches",
@@ -99,7 +99,7 @@ DEFAULTS = {
     "backup_dir": os.path.join(APP_DIR, "backups"),
     # 网关 / 登录器 / 通讯验证
     "pm_src": "/opt/purplemagic-src",
-    "pm_repo": "git@github-xianren:yuanqilei/xianren.git",
+    "pm_repo": "https://github.com/yuanqilei/purplemagic-nexus.git",
     "pm_data": "/opt/purplemagic/data2",
     "launcher_exe": "",
     "client_dir": "",
@@ -1064,7 +1064,7 @@ class App:
                   highlightthickness=1, highlightbackground=C_LINE).pack(
             side="left", padx=(6, 0))
         r += 1
-        self._flabel(form, r, "远程仓库", tip="示例：https://github.com/Cec1c/ServerS5A3.git\n必须含 runtime/docker/。")
+        self._flabel(form, r, "远程仓库", tip="示例：https://github.com/yuanqilei/s5a3-server.git\n首次部署需先在服务器上 prepare 生成 runtime/docker/。")
         self.e_repo, _ = self._fentry(form, r, c["repo"], colspan=3)
         r += 1
 
