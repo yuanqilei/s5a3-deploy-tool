@@ -40,6 +40,9 @@ class FakeTool:
     def _pm_compose(self, cfg): return "docker compose -f fixture.yaml"
     def _log(self, *args): pass
     def _line_cb(self, line): pass
+    def _publish_generated_launcher(self, cli, cfg): self.published = True
+    def _prepare_gateway(self, cli, cfg): self.prepared = True
+    def _export_launcher_profile(self, cli, cfg): self.exported = True
     def _verify_pm(self, cli, cfg): self.verified = True
 
 

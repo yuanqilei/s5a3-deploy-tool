@@ -17,7 +17,7 @@ a = Analysis(
     [str(SPECPATH + '/../src/s5a3_deploy_tool.py')],
     pathex=[str(SPECPATH + '/../src')],
     binaries=[],
-    datas=[('S5A3BG.jpg', '.'), *extra_data],
+    datas=[('S5A3BG.jpg', '.'), ('../src/gateway_bootstrap.py', '.'), ('launcher-template.exe', '.'), *extra_data],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

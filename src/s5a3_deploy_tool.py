@@ -157,7 +157,7 @@ F_ENTRY = ("Consolas", 10)
 F_LOG = ("Consolas", 9)
 
 
-TOOL_VERSION = "2026.11.20.9"
+TOOL_VERSION = "2026.11.21.1"
 TOOL_BUILD = "2026-11-19"
 
 
@@ -2092,14 +2092,14 @@ docker compose -p servers5a3 -f {COMPOSE} ps
             cli.close()
 
     # ---------------- 网关 / 登录器 / 通讯验证 ----------------
-    def _gm_profile(self, cli):
+    def _gm_profile(self, cli, cfg=None):
         """读面板侧 profile.json。
 
         位置随 install_gm.sh 版本变过：早期放 data/，现在放 inputs/（settings.json 的
         approvedProfile 指向它），另有 data/private/player-profile.json 一份副本。
         写死一个路径就会把「已装好」误报成「读不到」。
         """
-        for rel in ("data/profile.json", "inputs/profile.json",
+        for rel in (posixpath.join((cfg or {}).get("pm_data") or DEFAULTS["pm_data"], "private/player-profile.json"), "data/profile.json", "inputs/profile.json",
                     "data/private/player-profile.json"):
             txt = self._remote_text(cli, posixpath.join(GM_BASE, rel))
             if not txt:
@@ -2385,7 +2385,7 @@ echo "      源码已覆盖（runtime/docker/data 未被触碰）"
         _, code = cli.capture(
             "curl -s -o /dev/null -w '%{http_code}' -m 8 http://127.0.0.1:17002/api/status")
         code = (code or "").strip()
-        if code == "200":
+        if rc == 0 and code == "200":
             self._log("      /api/status 200", "ok")
         else:
             self._log(f"[警告] /api/status 返回 {code or '无响应'}", "err")
@@ -2840,7 +2840,7 @@ if [ -d {q(cfg['patch_dir'])} ]; then ls -1 {q(cfg['patch_dir'])}; else echo '�
             sv_sha = self._remote_sha(cli, sv_pvf)
             gm_sha = ""
             prof = {}
-            prel, prof = self._gm_profile(cli)
+            prel, prof = self._gm_profile(cli, cfg)
             for k in ("PvfSha256", "pvfSha256", "pvf_sha256"):
                 if prof.get(k):
                     gm_sha = str(prof[k]).lower()
@@ -3053,17 +3053,13 @@ done
              "每次部署都会初始化管理表；初始化失败时停止，不启动新服务。",
              "玩家 API 会短暂中断（几秒到几分钟，取决于是否重建镜像）。",
              "填了「GM 仓库」时会先 git reset --hard 到最新代码（该目录未提交改动会丢）。",
-             "不会改动登录器档案与已发布内容。"],
+             "首次自动生成网关配置；已有配置和密钥保留。部署成功后导出并发布配套玩家启动器。"],
             "docker compose", False))
 
     def do_pm_deploy(self, cfg):
         self._log("== 部署 GM 后台（PurpleMagic） ==", "gold")
         cli = self._ssh(cfg)
         try:
-            rc, out = cli.capture("test -f %s/deploy/selfhost/compose.yaml && echo ok"
-                                  % q(cfg["pm_src"]))
-            if "ok" not in (out or ""):
-                raise RuntimeError("服务器上没有 %s/deploy/selfhost/compose.yaml" % cfg["pm_src"])
             compose = self._pm_compose(cfg)
 
             repo = (cfg.get("pm_repo") or "").strip()
@@ -3090,6 +3086,10 @@ fi
                 if rc != 0:
                     raise RuntimeError("从仓库同步 GM 源码失败")
 
+            rc, out = cli.capture("test -f %s/deploy/selfhost/compose.yaml && echo ok" % q(cfg["pm_src"]))
+            if rc != 0 or "ok" not in (out or ""):
+                raise RuntimeError("网关源码缺少 compose.yaml，请填写正确的 GM 仓库")
+            self._prepare_gateway(cli, cfg)
             self._log("      构建镜像（首次 5-10 分钟，之后走缓存）…")
             rc = cli.run(compose + " build", self._line_cb, timeout=3600)
             if rc != 0:
@@ -3118,9 +3118,85 @@ fi
             if rc != 0:
                 raise RuntimeError("compose up 失败")
             self._verify_pm(cli, cfg)
+            self._export_launcher_profile(cli, cfg)
+            self._publish_generated_launcher(cli, cfg)
             self._log("== 部署完成 ==", "ok")
         finally:
             cli.close()
+
+    def _prepare_gateway(self, cli, cfg):
+        hashes = self._local_client_sha(cfg)
+        rc, out = cli.capture("test -f %s/compose.env && echo ready" % q(cfg["pm_data"]))
+        if "ready" not in (out or "") and not all(hashes.values()):
+            raise RuntimeError("首次部署网关需先选择同时含 DNF.exe 与 Script.pvf 的客户端目录")
+        self._log("      准备网关配置（已有密钥保留；首次自动生成）…")
+        helper = os.path.join(RES_DIR, "gateway_bootstrap.py")
+        if not os.path.isfile(helper):
+            raise RuntimeError("工具缺少首次部署组件，请重新下载完整新版工具")
+        payload = {k: cfg.get(k, "") for k in ("pm_src", "pm_data", "path", "host", "advertise_ip")}
+        payload.update(exe_sha256=hashes["DNF.exe"], pvf_sha256=hashes["Script.pvf"])
+        work = "/tmp/pm-prepare-" + secrets.token_hex(8)
+        self._mkdir(cli, work)
+        with tempfile.TemporaryDirectory(prefix="pm-input-") as local:
+            config = os.path.join(local, "input.json")
+            with open(config, "w", encoding="utf-8") as stream:
+                json.dump(payload, stream)
+            cli.sftp_put(helper, work + "/gateway_bootstrap.py")
+            cli.sftp_put(config, work + "/input.json")
+        rc = cli.run("python3 %s %s" % (q(work + "/gateway_bootstrap.py"), q(work + "/input.json")), self._line_cb, timeout=600)
+        if rc != 0:
+            raise RuntimeError("网关首次配置失败，已有材料保留；查看上方具体错误")
+
+    def _export_launcher_profile(self, cli, cfg):
+        path = posixpath.join(cfg["pm_data"], "private/player-profile.json")
+        text = self._remote_text(cli, path)
+        profile = json.loads(text) if text else None
+        if not isinstance(profile, dict) or not profile.get("UpdatePublicKey"):
+            raise RuntimeError("网关未提供完整通讯配置，无法交付启动器")
+        template = os.path.join(RES_DIR, "launcher-template.exe")
+        if not os.path.isfile(template):
+            raise RuntimeError("缺少通用启动器模板，请使用含模板的完整新版工具")
+        output = os.path.join(APP_DIR, "玩家启动器")
+        os.makedirs(output, exist_ok=True)
+        for name in ("PurpleMagic.exe", "PurpleMagic.profile.json"):
+            target = os.path.join(output, name)
+            if os.path.isfile(target):
+                shutil.copy2(target, target + ".bak-" + time.strftime("%Y%m%d-%H%M%S"))
+        shutil.copy2(template, os.path.join(output, "PurpleMagic.exe"))
+        with open(os.path.join(output, "PurpleMagic.profile.json"), "w", encoding="utf-8") as stream:
+            json.dump(profile, stream, ensure_ascii=False, indent=2)
+        self._log("      已导出玩家启动器：%s（EXE 与通讯配置请成套分发）" % output, "ok")
+
+    def _publish_generated_launcher(self, cli, cfg):
+        import zipfile
+        directory = os.path.join(APP_DIR, "玩家启动器")
+        package = os.path.join(directory, "ServerS5A3-1.0.18.zip")
+        with zipfile.ZipFile(package, "w", zipfile.ZIP_DEFLATED) as archive:
+            for name in ("PurpleMagic.exe", "PurpleMagic.profile.json"):
+                archive.write(os.path.join(directory, name), name)
+        release = self._detect_release_dir(cli, cfg)
+        if not release:
+            raise RuntimeError("网关发布目录无法解析，已导出本地启动器但尚未发布")
+        for local_name, remote_name in (("PurpleMagic.exe", "PurpleMagic.exe"), ("ServerS5A3-1.0.18.zip", "ServerS5A3-1.0.18.zip")):
+            target = posixpath.join(release, remote_name)
+            self._put_verified(cli, os.path.join(directory, local_name), target, "玩家启动器")
+            rc = cli.run("chmod 644 %s" % q(target), self._line_cb, timeout=30)
+            if rc != 0:
+                raise RuntimeError("无法设置启动器下载权限")
+        rc, code = cli.capture("curl -ks -m 15 -o /dev/null -w '%{http_code}' https://127.0.0.1:8443/launcher/ServerS5A3-1.0.18.zip")
+        if rc != 0 or (code or "").strip() != "200":
+            raise RuntimeError("启动器 ZIP 下载检查失败，未完成交付")
+        cfg["launcher_exe"] = os.path.join(directory, "PurpleMagic.exe")
+        if hasattr(self, "root") and hasattr(self, "e_launcher"):
+            path = cfg["launcher_exe"]
+            def select_export():
+                self.e_launcher.delete(0, "end")
+                self.e_launcher.insert(0, path)
+                self.cfg.update(cfg)
+                save_config(self.cfg)
+            self.root.after(0, select_export)
+        adv = (cfg.get("advertise_ip") or cfg["host"]).strip()
+        self._log("      玩家下载整包：https://%s:8443/launcher/ServerS5A3-1.0.18.zip（解压后保留两个文件）" % adv, "ok")
 
     def _verify_pm(self, cli, cfg):
         rc, out = cli.capture("sleep 3; curl -sk -m 10 -o /dev/null -w '%{http_code}' "
@@ -3266,16 +3342,21 @@ fi
 
     # ---------------- 登录器 ----------------
     # ---------------- 登录器 ----------------
-    def _detect_release_dir(self, cli):
+    def _detect_release_dir(self, cli, cfg=None):
+        cfg = cfg or DEFAULTS
+        data = cfg.get("pm_data") or DEFAULTS["pm_data"]
         """从网关配置里找 release_dir，找不到返回空。"""
-        for p in (f"{GM_BASE}/data/gateway.json", f"{GM_BASE}/settings.json",
+        for p in (posixpath.join(data, "gateway.json"), f"{GM_BASE}/data/gateway.json", f"{GM_BASE}/settings.json",
                   f"{GM_BASE}/data/service.json"):
             txt = self._remote_text(cli, p)
             if not txt:
                 continue
             m = re.search(r'"release_dir"\s*:\s*"([^"]+)"', txt)
             if m:
-                return m.group(1)
+                value = m.group(1)
+                if p == posixpath.join(data, "gateway.json") and value.startswith("/data/"):
+                    return posixpath.join(data, value[len("/data/"):])
+                return value
         return ""
 
     def _publish_confirm(self):
@@ -3308,26 +3389,25 @@ fi
         try:
             rel = (cfg.get("release_dir") or "").strip()
             if not rel:
-                rel = self._detect_release_dir(cli)
+                rel = self._detect_release_dir(cli, cfg)
                 if rel:
                     self._log(f"      从网关配置探测到 release_dir：{rel}")
             if not rel:
-                rel = posixpath.join(GM_BASE, "data/release")
-                self._log(f"[警告] 没探测到 release_dir，改用默认 {rel}", "err")
+                raise RuntimeError("网关尚未初始化，无法确定发布目录。请先执行「部署 GM 后台／网关」。")
             name = "PurpleMagic.exe"
             self._mkdir(cli, rel)
             dst = posixpath.join(rel, name)
             self._put_verified(cli, local, dst, "登录器")
             adv = (cfg.get("advertise_ip") or cfg["host"]).strip()
-            _, code = cli.capture(
-                f"curl -s -o /dev/null -w '%{{http_code}}' -m 8 "
-                f"http://127.0.0.1/launcher/{name}")
+            rc, code = cli.capture(
+                f"curl -ks -o /dev/null -w '%{{http_code}}' -m 8 "
+                f"https://127.0.0.1:8443/launcher/{name}")
             code = (code or "").strip()
-            if code == "200":
-                self._log(f"      下载路径可用：http://{adv}/launcher/{name}", "ok")
+            if rc == 0 and code == "200":
+                self._log(f"      下载路径可用：https://{adv}:8443/launcher/{name}", "ok")
             else:
                 self._log(f"[警告] /launcher/{name} 返回 {code or '无响应'}", "err")
-                self._log("       确认网关已重启并加载新发布目录，或检查 nginx 反代", "err")
+                raise RuntimeError("文件已上传，但 HTTPS 下载检查失败；本次发布未完成。请检查网关状态。")
             self._log("== 登录器上传完成 ==", "ok")
         finally:
             cli.close()
@@ -3457,6 +3537,10 @@ fi
 
     def do_profile_generate(self, cfg):
         self._log("== 生成通讯文件（写服务器） ==", "gold")
+        data = cfg["pm_data"]
+        profile_path = posixpath.join(data, "private/player-profile.json")
+        state_path = posixpath.join(data, "hub/state.json")
+        cert_path = posixpath.join(data, "tls-player/server.crt")
         adv = (cfg.get("advertise_ip") or cfg["host"]).strip()
         local = self._local_client_sha(cfg)
         if not local["DNF.exe"] or not local["Script.pvf"]:
@@ -3466,7 +3550,7 @@ fi
         cli = self._ssh(cfg)
         try:
             # 1) 以服务端现有 profile 为模板（保留 ChannelServerId / ChannelHistory 等字段）
-            rc, txt = cli.capture("cat %s" % q(self.PROFILE_INPUTS))
+            rc, txt = cli.capture("cat %s" % q(profile_path))
             prof = None
             if rc == 0 and (txt or "").strip().startswith("{"):
                 try:
@@ -3474,15 +3558,15 @@ fi
                 except Exception:
                     prof = None
             if prof is None:
-                rc, txt = cli.capture("cat %s" % q(self.PROFILE_PRIVATE))
+                rc, txt = cli.capture("cat %s" % q(profile_path))
                 if rc != 0 or not (txt or "").strip().startswith("{"):
-                    raise RuntimeError("服务端读不到现有 profile.json（GM 网关没装？）")
+                    raise RuntimeError("所选网关数据目录中没有 profile.json；请先执行「部署 GM 后台／网关」")
                 prof = json.loads(txt)
 
             # 2) TLS 证书 DER 指纹
             rc, der = cli.capture(
                 "openssl x509 -in %s -outform DER 2>/dev/null | openssl dgst -sha256"
-                % q(self.PROFILE_CERT))
+                % q(cert_path))
             m = re.search(r"([0-9a-fA-F]{64})", der or "")
             cert_sha = m.group(1).lower() if m else ""
             if cert_sha:
@@ -3507,7 +3591,7 @@ fi
                 prof["CertificateSha256"] = cert_sha
 
             # 4) hub state：published.profile 同步 + sequence+1
-            rc, st = cli.capture("cat %s" % q(self.PROFILE_STATE))
+            rc, st = cli.capture("cat %s" % q(state_path))
             state = json.loads(st) if rc == 0 and (st or "").strip().startswith("{") else None
             if state is None:
                 raise RuntimeError("读不到 hub state.json（网关没装？）")
@@ -3517,11 +3601,19 @@ fi
             pub["sequence"] = int(old_seq) + 1
             state["published"] = pub
 
-            # 5) 落地三个文件（临时目录 → install，保持 dnf90gm 属主与权限）
+            rc, owner = cli.capture("stat -c '%u:%g' %s" % q(profile_path))
+            owner = (owner or "").strip()
+            if rc != 0 or not re.fullmatch(r"[0-9]+:[0-9]+", owner):
+                raise RuntimeError("无法确认网关配置属主，未写入")
+            uid, gid = owner.split(":")
+            backup = posixpath.join(data, "profile-backups", time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(4))
+            rc = cli.run("mkdir -p %s && chmod 700 %s && cp -p %s %s/ && cp -p %s %s/" % (q(backup), q(backup), q(profile_path), q(backup), q(state_path), q(backup)), self._line_cb, timeout=120)
+            if rc != 0:
+                raise RuntimeError("通讯配置备份失败，未写入")
+            # 5) 落地两个文件（临时目录 → install，保持现有属主与权限）
             local_tmp = tempfile.mkdtemp(prefix="dsh-profgen-")
             try:
-                items = [("profile-inputs.json", prof, 0o644),
-                         ("player-profile.json", prof, 0o600),
+                items = [("player-profile.json", prof, 0o600),
                          ("state.json", state, 0o600)]
                 for name, obj, mode in items:
                     lp = os.path.join(local_tmp, name)
@@ -3530,11 +3622,10 @@ fi
                     cli.sftp_put(lp, "/tmp/" + name)
                 script = (
                     "set -e\n"
-                    "install -o dnf90gm -g dnf90gm -m 644 /tmp/profile-inputs.json %s\n"
-                    "install -o dnf90gm -g dnf90gm -m 600 /tmp/player-profile.json %s\n"
-                    "install -o dnf90gm -g dnf90gm -m 600 /tmp/state.json %s\n"
+                    "install -o %s -g %s -m 600 /tmp/player-profile.json %s\n"
+                    "install -o %s -g %s -m 600 /tmp/state.json %s\n"
                     "rm -f /tmp/profile-inputs.json /tmp/player-profile.json /tmp/state.json\n"
-                    % (q(self.PROFILE_INPUTS), q(self.PROFILE_PRIVATE), q(self.PROFILE_STATE)))
+                    % (uid, gid, q(profile_path), uid, gid, q(state_path)))
                 rc = cli.run(script, self._line_cb, timeout=120)
                 if rc != 0:
                     raise RuntimeError("写入 profile / state 失败")
@@ -3543,11 +3634,13 @@ fi
 
             # 6) 重启网关并读回验证
             self._log("      重启 purplemagic-gateway …", "gold")
-            rc = cli.run("systemctl restart purplemagic-gateway; sleep 3; "
-                         "systemctl is-active purplemagic-gateway", self._line_cb, timeout=120)
+            rc = cli.run(self._pm_compose(cfg) + " restart gateway", self._line_cb, timeout=120)
+            if rc != 0:
+                raise RuntimeError("网关重启失败；通讯配置备份：" + backup)
+            time.sleep(3)
             boot = self._bootstrap(cli)
             if not boot:
-                raise RuntimeError("网关重启后读不到 bootstrap.json，谨慎处理：检查 systemctl status")
+                raise RuntimeError("网关重启后读不到 bootstrap.json，谨慎处理：检查网关 Compose 日志")
             prof2 = boot.get("profile") or {}
             self._log("      新 sequence %s" % boot.get("sequence"))
             ok_exe = str(prof2.get("ExeSha256", "")).lower() == local["DNF.exe"].lower()
@@ -3559,6 +3652,8 @@ fi
             sig_ok = self._verify_profile_signature(cli, boot, prof2)
             if not (ok_exe and ok_pvf and sig_ok is not False):
                 raise RuntimeError("发布后读回校验未通过")
+            self._export_launcher_profile(cli, cfg)
+            self._publish_generated_launcher(cli, cfg)
             self._log("== 通讯文件已发布：sequence %s → %s ==" % (old_seq, boot.get("sequence")), "ok")
         finally:
             cli.close()
