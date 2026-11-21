@@ -158,7 +158,7 @@ F_ENTRY = ("Consolas", 10)
 F_LOG = ("Consolas", 9)
 
 
-TOOL_VERSION = "2026.11.21.2"
+TOOL_VERSION = "2026.11.21.3"
 TOOL_BUILD = "2026-11-19"
 
 
@@ -284,6 +284,13 @@ def save_config(cfg):
 def q(s):
     """shell 单引号转义。远程路径一律用它包。"""
     return "'" + str(s).replace("'", "'\\''") + "'"
+
+
+def _run_as_file_owner(path, command):
+    """Run a protected-file update as its current non-root owner."""
+    return ("owner=$(stat -c '%%U' %s); test -n \"$owner\" && "
+            "test \"$owner\" != root && "
+            "runuser -u \"$owner\" -- %s") % (q(path), command)
 
 
 def human_size(n):
@@ -3288,7 +3295,10 @@ fi
                 f.write(helper)
             cli.sftp_put(local, "/tmp/pm-reset-token.py")
 
-            rc, out = cli.capture("runuser -u dnf90gm -- env HOME=/tmp python3 /tmp/pm-reset-token.py 2>&1")
+            gateway_json = cfg["pm_data"] + "/gateway.json"
+            owner_cmd = _run_as_file_owner(
+                gateway_json, "env HOME=/tmp python3 /tmp/pm-reset-token.py 2>&1")
+            rc, out = cli.capture(owner_cmd)
             self._log("      " + (out or "").strip()[:200])
             if "token updated" not in (out or ""):
                 raise RuntimeError("写 gateway.json 失败")
