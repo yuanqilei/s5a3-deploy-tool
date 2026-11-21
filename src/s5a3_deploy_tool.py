@@ -158,7 +158,7 @@ F_ENTRY = ("Consolas", 10)
 F_LOG = ("Consolas", 9)
 
 
-TOOL_VERSION = "2026.11.21.3"
+TOOL_VERSION = "2026.11.21.4"
 TOOL_BUILD = "2026-11-19"
 
 
@@ -291,6 +291,76 @@ def _run_as_file_owner(path, command):
     return ("owner=$(stat -c '%%U' %s); test -n \"$owner\" && "
             "test \"$owner\" != root && "
             "runuser -u \"$owner\" -- %s") % (q(path), command)
+
+
+def _pm_token_reset_helper(pm_data, payload_path="/tmp/pm-token.json"):
+    return """import hashlib, json, os, pathlib, stat
+payload_path = %r
+d = json.load(open(payload_path))
+if hashlib.sha256(d['token'].encode()).hexdigest() != d['sha256']:
+    raise ValueError('token payload hash mismatch')
+base = pathlib.Path(%r)
+gateway_path = base / 'gateway.json'
+service_path = base / 'service.json'
+token_path = base / 'admin-token.txt'
+gateway = json.loads(gateway_path.read_text())
+service = json.loads(service_path.read_text())
+if not isinstance(gateway.get('management'), dict) or not isinstance(gateway.get('launcher_hub'), dict):
+    raise ValueError('gateway token settings unavailable')
+if 'loginKeySha256' not in service:
+    raise ValueError('GM service token setting unavailable')
+gateway['management']['loginKeySha256'] = d['sha256']
+gateway['launcher_hub']['admin_token_sha256'] = d['sha256']
+service['loginKeySha256'] = d['sha256']
+updates = {
+    gateway_path: (json.dumps(gateway, ensure_ascii=False, indent=2) + '\\n').encode(),
+    service_path: (json.dumps(service, ensure_ascii=False, indent=2) + '\\n').encode(),
+    token_path: (d['token'] + '\\n').encode(),
+}
+old = {p: (p.read_bytes(), stat.S_IMODE(p.stat().st_mode)) for p in updates}
+written = []
+try:
+    for path, content in updates.items():
+        mode = old[path][1] if path != token_path else 0o600
+        temp = path.with_name(path.name + '.token-reset-tmp')
+        temp.write_bytes(content)
+        os.chmod(temp, mode)
+        os.replace(temp, path)
+        written.append(path)
+except Exception:
+    for path in reversed(written):
+        temp = path.with_name(path.name + '.token-reset-rollback')
+        temp.write_bytes(old[path][0])
+        os.chmod(temp, old[path][1])
+        os.replace(temp, path)
+    raise
+print('token updated in gateway, hub and GM service')
+""" % (payload_path, pm_data)
+
+
+def _pm_gm_login_check_helper():
+    return """import http.cookiejar, json, urllib.error, urllib.request
+token = json.load(open('/tmp/pm-token.json'))['token']
+jar = http.cookiejar.CookieJar()
+opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+def post(path, body):
+    request = urllib.request.Request('http://127.0.0.1:18080' + path,
+        data=json.dumps(body).encode(), headers={'Content-Type': 'application/json'}, method='POST')
+    try:
+        with opener.open(request, timeout=10) as response:
+            return response.status, json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        return error.code, {}
+status, result = post('/api/auth/login', {'password': token, 'remember': False})
+if status != 200 or not result.get('authenticated'):
+    print('GM login verification failed HTTP=' + str(status))
+    raise SystemExit(1)
+status, _ = post('/api/auth/logout', {})
+if status != 200:
+    print('GM logout verification failed HTTP=' + str(status))
+    raise SystemExit(1)
+print('GM login verified HTTP=200; logout HTTP=200')
+"""
 
 
 def human_size(n):
@@ -3260,7 +3330,7 @@ fi
         self._start(self.do_pm_reset_token, danger=(
             "重置 GM 管理 Token",
             ["生成新的 48 位 Token，旧 Token 立即失效。",
-             "会更新 gateway.json 里的两处 sha256 并重启 gateway。",
+             "会更新 gateway.json 和 service.json 的校验值并重启 GM 服务。",
              "新 Token 在日志里显示一次，并自动复制到剪贴板。"],
             "gateway.json", False))
 
@@ -3276,21 +3346,7 @@ fi
                 f.write(payload)
             cli.sftp_put(local, "/tmp/pm-token.json")
 
-            helper = (
-                "import json, os, hashlib\n"
-                "d = json.load(open('/tmp/pm-token.json'))\n"
-                "p = %r\n"
-                "cfg = json.load(open(p))\n"
-                "cfg['management']['loginKeySha256'] = d['sha256']\n"
-                "cfg['launcher_hub']['admin_token_sha256'] = d['sha256']\n"
-                "tmp = p + '.tmp'\n"
-                "json.dump(cfg, open(tmp, 'w'), ensure_ascii=False, indent=2)\n"
-                "os.chmod(tmp, 0o600)\n"
-                "os.replace(tmp, p)\n"
-                "open(os.path.join(os.path.dirname(p), 'admin-token.txt'), 'w').write(d['token'] + '\\n')\n"
-                "os.chmod(os.path.join(os.path.dirname(p), 'admin-token.txt'), 0o600)\n"
-                "print('token updated')\n"
-            ) % (cfg["pm_data"] + "/gateway.json")
+            helper = _pm_token_reset_helper(cfg["pm_data"])
             with open(local, "w", encoding="utf-8", newline="\n") as f:
                 f.write(helper)
             cli.sftp_put(local, "/tmp/pm-reset-token.py")
@@ -3300,17 +3356,27 @@ fi
                 gateway_json, "env HOME=/tmp python3 /tmp/pm-reset-token.py 2>&1")
             rc, out = cli.capture(owner_cmd)
             self._log("      " + (out or "").strip()[:200])
-            if "token updated" not in (out or ""):
+            if "token updated in gateway, hub and GM service" not in (out or ""):
                 raise RuntimeError("写 gateway.json 失败")
 
-            self._log("      重启 gateway …")
-            rc = cli.run(self._pm_compose(cfg) + " restart gateway", self._line_cb, timeout=300)
+            self._log("      重启 gateway 和 GM 服务 …")
+            rc = cli.run(self._pm_compose(cfg) + " restart gateway gm", self._line_cb, timeout=300)
             if rc != 0:
-                raise RuntimeError("重启 gateway 失败")
+                raise RuntimeError("重启 gateway / GM 服务失败")
+            local = os.path.join(tempfile.gettempdir(), "pm-verify-token.py")
+            with open(local, "w", encoding="utf-8", newline="\n") as f:
+                f.write(_pm_gm_login_check_helper())
+            cli.sftp_put(local, "/tmp/pm-verify-token.py")
+            owner_cmd = _run_as_file_owner(
+                cfg["pm_data"] + "/service.json", "python3 /tmp/pm-verify-token.py 2>&1")
+            rc, out = cli.capture(owner_cmd)
+            self._log("      " + (out or "").strip()[:200], "ok" if "GM login verified HTTP=200" in (out or "") else "err")
+            if rc != 0 or "GM login verified HTTP=200" not in (out or ""):
+                raise RuntimeError("GM 登录 Token 校验失败")
             self._verify_pm_login(cli, cfg, token)
         finally:
             try:
-                cli.capture("rm -f /tmp/pm-token.json /tmp/pm-reset-token.py")
+                cli.capture("rm -f /tmp/pm-token.json /tmp/pm-reset-token.py /tmp/pm-verify-token.py")
             except Exception:
                 pass
             cli.close()
