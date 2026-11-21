@@ -3848,7 +3848,7 @@ fi
         adv = (cfg.get("advertise_ip") or cfg["host"]).strip()
         self._log("== 启动登录器 ==", "gold")
         self._log(f"      频道引导：{adv}:7001")
-        self._log(f"      GM 面板  ：http://{adv}/console/")
+        self._log(f"      GM 面板  ：https://{adv}/console/")
         self._log("      连不上先跑「通讯验证」，看端口和频道表是否对得上")
         subprocess.Popen([exe], cwd=os.path.dirname(exe) or None)
         self._log(f"      已拉起：{os.path.basename(exe)}", "ok")
