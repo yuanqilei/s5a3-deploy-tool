@@ -1,6 +1,7 @@
 """Deployment runtime contracts without SSH, Docker, credentials or a GUI."""
 import ast
 import json
+import ipaddress
 import os
 from pathlib import Path
 import posixpath
@@ -10,9 +11,9 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 tree = ast.parse((ROOT / "src/s5a3_deploy_tool.py").read_text(encoding="utf-8-sig"))
-names = {"_check_runtime", "_prepare_runtime", "_build_and_up", "_deploy_flow"}
+names = {"_runtime_network_args", "_check_runtime", "_prepare_runtime", "_build_and_up", "_deploy_flow"}
 methods = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name in names]
-namespace = {"q": shlex.quote, "posixpath": posixpath, "COMPOSE": "runtime/docker/compose.json",
+namespace = {"ipaddress": ipaddress, "q": shlex.quote, "posixpath": posixpath, "COMPOSE": "runtime/docker/compose.json",
              "DB_C": "servers5a3-db-1", "SERVER_C": "servers5a3-server-1"}
 exec(compile(ast.Module(body=methods, type_ignores=[]), "deployment", "exec"), namespace)
 RUNTIME = {"runtime/docker/compose.json", "runtime/docker/server.env", "runtime/docker/database.env"}
@@ -42,6 +43,7 @@ class SSH:
 
 
 class Tool:
+    _runtime_network_args = namespace["_runtime_network_args"]
     _check_runtime = namespace["_check_runtime"]
     _prepare_runtime = namespace["_prepare_runtime"]
     _build_and_up = namespace["_build_and_up"]
@@ -60,6 +62,30 @@ class Tool:
 
 class RuntimePreparationTests(unittest.TestCase):
     cfg = {"path": "/fixture"}
+
+    def test_public_host_reaches_both_initial_prepare_stages(self):
+        cli = SSH(set())
+        Tool(cli)._prepare_runtime(cli, {"path": "/fixture", "host": "8.8.8.8"})
+        stages = [line for line in cli.commands[0].splitlines() if line.startswith(("run_stage prepare ", "run_stage final_prepare "))]
+        self.assertEqual(len(stages), 2)
+        for line in stages:
+            self.assertIn("--advertise-ip 8.8.8.8 --bind-ip 0.0.0.0", line)
+
+    def test_private_default_does_not_enable_public_bind(self):
+        self.assertEqual(Tool(SSH(set()))._runtime_network_args({"host": "192.168.1.5"}), "")
+
+    def test_explicit_advertise_overrides_ssh_address(self):
+        flags = Tool(SSH(set()))._runtime_network_args({"host": "10.0.0.2", "advertise_ip": "8.8.4.4"})
+        self.assertEqual(flags, " --advertise-ip 8.8.4.4 --bind-ip 0.0.0.0")
+
+    def test_update_prepares_network_only_after_successful_build(self):
+        cli = SSH(set())
+        Tool(cli)._build_and_up(cli, {"path": "/fixture", "host": "8.8.8.8"}, True)
+        script = cli.commands[0]
+        self.assertLess(script.index("docker build"), script.index("network-backups"))
+        self.assertLess(script.index("network-backups"), script.index("manage.py prepare"))
+        self.assertLess(script.index("manage.py prepare"), script.index(" up -d "))
+        self.assertIn("--advertise-ip 8.8.8.8 --bind-ip 0.0.0.0", script)
 
     def test_fresh_git_checkout_prepares_missing_runtime(self):
         cli = SSH({"deploy/docker/Dockerfile"})

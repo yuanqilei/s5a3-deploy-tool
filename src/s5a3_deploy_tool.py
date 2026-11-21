@@ -17,6 +17,7 @@ S5A3 服务端一键部署工具
 
 import base64
 import hashlib
+import ipaddress
 import json
 import os
 import posixpath
@@ -157,7 +158,7 @@ F_ENTRY = ("Consolas", 10)
 F_LOG = ("Consolas", 9)
 
 
-TOOL_VERSION = "2026.11.21.1"
+TOOL_VERSION = "2026.11.21.2"
 TOOL_BUILD = "2026-11-19"
 
 
@@ -1903,8 +1904,26 @@ rm -rf "$STAGE" "$TMP"
                 "运行配置缺少：" + "、".join(missing) + "；这些文件不在 Git 仓库中，请首次部署生成或恢复原配置备份")
         self._log("      必需文件齐全", "ok")
 
+    def _runtime_network_args(self, cfg):
+        explicit = (cfg.get("advertise_ip") or "").strip()
+        value = explicit or (cfg.get("host") or "").strip()
+        if not value:
+            return ""
+        try:
+            address = ipaddress.IPv4Address(value)
+        except ValueError:
+            raise RuntimeError("服务器地址／宣告地址必须是 IPv4")
+        if address.is_unspecified or address.is_loopback or address.is_link_local or address.is_multicast:
+            raise RuntimeError("不能把未指定、回环、链路本地或组播地址宣告给玩家")
+        private = any(address in ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
+        if private and not explicit:
+            return ""
+        flags = " --advertise-ip " + q(str(address))
+        return flags if private else flags + " --bind-ip 0.0.0.0"
+
     def _prepare_runtime(self, cli, cfg):
         """Bootstrap or resume an interrupted new installation, preserving identity."""
+        network_args = self._runtime_network_args(cfg)
         self._log("      检查首次部署/恢复条件并准备运行配置（不启动容器）…", "gold")
         script = f"""
 set -e
@@ -1981,14 +2000,14 @@ run_stage() {{
   return "$CODE"
 }}
 run_stage build_image python3 deploy/docker/manage.py build --image servers5a3:launcher --project servers5a3
-run_stage prepare python3 deploy/docker/manage.py prepare --image servers5a3:launcher --project servers5a3
+run_stage prepare python3 deploy/docker/manage.py prepare --image servers5a3:launcher --project servers5a3{network_args}
 run_stage recommended python3 - <<'PY'
 import json, os
 from pathlib import Path
 path = Path('runtime/docker/instance.json')
 config = json.loads(path.read_text(encoding='utf-8'))
 recommended = json.loads(Path('deploy/templates/docker-instance.recommended.json').read_text(encoding='utf-8'))
-protected = {{'database_password', 'root_password', 'admin_token', 'host_ip', 'subnet', 'server_ip', 'database_ip', 'client_dir', 'server_image'}}
+protected = {{'database_password', 'root_password', 'admin_token', 'host_ip', 'advertise_ip', 'bind_ip', 'subnet', 'server_ip', 'database_ip', 'client_dir', 'server_image'}}
 if protected.intersection(recommended):
     raise SystemExit('推荐配置含部署身份字段，拒绝覆盖')
 merged = {{**config, **recommended, 'runtime_compatibility': {{**config.get('runtime_compatibility', {{}}), **recommended.get('runtime_compatibility', {{}})}}}}
@@ -1996,7 +2015,7 @@ temporary = path.with_suffix('.json.prepared')
 temporary.write_text(json.dumps(merged, indent=2) + '\\n', encoding='utf-8')
 os.replace(temporary, path)
 PY
-run_stage final_prepare python3 deploy/docker/manage.py prepare --image servers5a3:launcher --project servers5a3
+run_stage final_prepare python3 deploy/docker/manage.py prepare --image servers5a3:launcher --project servers5a3{network_args}
 rm -f runtime/docker/.s5a3-prepare-incomplete
 echo "      首次运行配置已生成，已应用官方推荐配置；未启动或删除任何容器/数据库卷"
 """
@@ -2025,6 +2044,7 @@ echo "      首次运行配置已生成，已应用官方推荐配置；未启�
         self._put_verified(cli, local, remote, "部署 PVF")
 
     def _build_and_up(self, cli, cfg, force):
+        network_args = self._runtime_network_args(cfg)
         flag = "--force-recreate" if force else ""
         script = f"""
 set -e
@@ -2040,6 +2060,16 @@ docker build -t servers5a3:launcher -f "$DOCKERFILE" . || {{
   docker images servers5a3 --format '{{{{.Repository}}}}:{{{{.Tag}}}}' | head -5
   exit 1
 }}
+if [ -n {q(network_args)} ]; then
+  echo "      备份并更新公网宣告配置"
+  BACKUP="runtime/docker/network-backups/$(date +%Y%m%d-%H%M%S)-$$"
+  mkdir -p "$BACKUP"
+  chmod 700 "$BACKUP"
+  for f in instance.json compose.json server.env database.env; do
+    [ ! -f "runtime/docker/$f" ] || cp -p "runtime/docker/$f" "$BACKUP/"
+  done
+  python3 deploy/docker/manage.py prepare --image servers5a3:launcher --project servers5a3{network_args}
+fi
 echo "      启动容器"
 docker compose -p servers5a3 -f {COMPOSE} up -d {flag}
 docker compose -p servers5a3 -f {COMPOSE} ps
