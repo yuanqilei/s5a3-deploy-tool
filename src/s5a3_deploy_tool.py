@@ -3601,7 +3601,7 @@ fi
             pub["sequence"] = int(old_seq) + 1
             state["published"] = pub
 
-            rc, owner = cli.capture("stat -c '%u:%g' %s" % q(profile_path))
+            rc, owner = cli.capture(f"stat -c '%u:%g' {q(profile_path)}")
             owner = (owner or "").strip()
             if rc != 0 or not re.fullmatch(r"[0-9]+:[0-9]+", owner):
                 raise RuntimeError("无法确认网关配置属主，未写入")
